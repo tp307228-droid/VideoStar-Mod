@@ -46,7 +46,7 @@ jobs:
           set -e
           export THEOS=$HOME/theos
           export PATH="$THEOS/bin:$PATH"
-          make package FINALPACKAGE=1 DEBUG=0 -j$(sysctl -n hw.ncpu) 2>&1
+          make FINALPACKAGE=1 DEBUG=0 -j$(sysctl -n hw.ncpu) 2>&1
 
       - name: Find FallVdsTool.dylib
         id: dylib
@@ -56,6 +56,8 @@ jobs:
           [ -z "$D" ] && { echo "dylib not found"; find . -name "*.dylib" 2>/dev/null; exit 1; }
           echo "path=$D" >> $GITHUB_OUTPUT
           echo "FallVdsTool.dylib: $D ($(du -sh "$D" | cut -f1))"
+          echo "Checking FallVdsTool.dylib dependencies (Must NOT have CydiaSubstrate):"
+          otool -L "$D"
 
       - name: Build insert_dylib
         run: |
@@ -124,14 +126,11 @@ jobs:
           DYLIB="${{ steps.dylib.outputs.path }}"
           cp "$DYLIB" "$APP/FallVdsTool.dylib"
 
-          SUB=$(find $HOME/theos -name "CydiaSubstrate" -o -name "libsubstrate.dylib" 2>/dev/null | head -1)
-          [ -n "$SUB" ] && cp "$SUB" "$APP/CydiaSubstrate" 2>/dev/null || true
-
           insert_dylib --strip-codesig --all-yes \
             "@executable_path/FallVdsTool.dylib" "$BINARY" "$BINARY"
 
           echo "Injected!"
-          otool -L "$BINARY" | grep -E "FallVds|executable"
+          otool -L "$BINARY" | grep -E "FallVds|VdsPro|executable"
 
       - name: Repack final IPA
         run: |
