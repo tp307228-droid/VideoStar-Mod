@@ -9,6 +9,10 @@
 #import <PhotosUI/PhotosUI.h>
 #import <objc/runtime.h>
 
+// Suppress ARC performSelector leak warnings — we use @try/@catch for safety
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+
 @interface MediaReplacerVC () <PHPickerViewControllerDelegate>
 @property (nonatomic, strong) NSMutableArray *dataLayers;  // layer objects từ project model
 @property (nonatomic, strong) UILabel        *countLabel;
@@ -121,7 +125,7 @@
     [_pickBtn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     _pickBtn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
     [_pickBtn addTarget:self action:@selector(pickImage) forControlEvents:UIControlEventTouchUpInside];
-    _pickBtn.heightAnchor.constraintEqualToConstant(52).active = YES;
+    [_pickBtn.heightAnchor constraintEqualToConstant:52].active = YES;
 
     // ── Progress ──────────────────────────────────────────
     _progressLabel = [UILabel new];
@@ -138,7 +142,7 @@
     _progressBar.layer.cornerRadius = 3;
     _progressBar.clipsToBounds = YES;
     _progressBar.hidden = YES;
-    _progressBar.heightAnchor.constraintEqualToConstant(6).active = YES;
+    [_progressBar.heightAnchor constraintEqualToConstant:6].active = YES;
 
     // layout
     for (UIView *v in @[card, _pickBtn, _progressLabel, _progressBar]) {
