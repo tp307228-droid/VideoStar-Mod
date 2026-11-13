@@ -9,11 +9,6 @@
 #import "FallVdsTool/HideStream.h"
 
 // ─────────────────────────────────────────────────────────
-// Filter: only run inside VideoStar
-// ─────────────────────────────────────────────────────────
-%filter(applications, com.frontierdesign.VideoStar);
-
-// ─────────────────────────────────────────────────────────
 // Hook UIWindow to inject our floating button on first launch
 // ─────────────────────────────────────────────────────────
 %hook UIWindow
