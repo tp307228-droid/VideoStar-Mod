@@ -12,6 +12,7 @@
 #import "LicenseManager.h"
 #import "Theme.h"
 #import "SVGIcons.h"
+#import <objc/runtime.h>
 
 // ════════════════════════════════════════════════════════
 // MARK: - Overlay Window (above all)
@@ -435,8 +436,6 @@
 
 - (void)updateFeatTabUI {
     NSArray<UIButton *> *tabs = @[_featTabMedia, _featTabQR, _featTabHide];
-    NSArray<UIView *>   *vcs  = @[_mediaVC.view, _qrVC.view,
-        [_featurePager viewWithTag:777] ?: _featurePager.subviews.lastObject];
 
     for (NSInteger i = 0; i < 3; i++) {
         BOOL active = (i == _selectedFeatTab);
