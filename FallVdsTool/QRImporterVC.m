@@ -8,6 +8,10 @@
 
 #import "QRImporterVC.h"
 #import "Theme.h"
+
+// Suppress ARC performSelector leak warnings
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
 #import "SVGIcons.h"
 #import <Photos/Photos.h>
 #import <PhotosUI/PhotosUI.h>
@@ -1032,7 +1036,6 @@ static NSArray<NSString *> *FVDQRTypes(void) {
 }
 
 - (UILabel *)makeStepTag:(NSString *)num text:(NSString *)text {
-    UIView *tag = [[UIView alloc] init]; // ignored, we build inline
     UILabel *lbl = [UILabel new]; lbl.translatesAutoresizingMaskIntoConstraints = NO;
     lbl.text = [NSString stringWithFormat:@"⬡ %@", text];
     lbl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
