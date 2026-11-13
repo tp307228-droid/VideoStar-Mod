@@ -68,11 +68,13 @@ jobs:
       - name: Download VideoStar-Pro.ipa
         run: |
           set -e
-          echo "Downloading VideoStar-Pro.ipa from Vds-Pro releases (tag: pro-latest)..."
+          echo "Downloading VideoStar-Pro.ipa from Vds-Pro releases..."
+          # Use PAT_TOKEN to access Vds-Pro (may be private repo)
+          AUTH_TOKEN="${{ secrets.PAT_TOKEN }}"
+          [ -z "$AUTH_TOKEN" ] && AUTH_TOKEN="${{ secrets.GITHUB_TOKEN }}"
 
-          # Try tag pro-latest first, fallback to scanning all releases for VideoStar-Pro.ipa
           RELEASES_JSON=$(curl -sf \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: Bearer $AUTH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/tp307228-droid/Vds-Pro/releases")
 
@@ -84,13 +86,13 @@ for rel in releases:
         if a['name'] == 'VideoStar-Pro.ipa':
             print(a['url'])
             sys.exit(0)
-")
+" 2>/dev/null)
 
-          [ -z "$ASSET_URL" ] && { echo "ERROR: VideoStar-Pro.ipa not found in any Vds-Pro release. Build Vds-Pro first!"; exit 1; }
-          echo "Asset URL found, downloading..."
+          [ -z "$ASSET_URL" ] && { echo "ERROR: VideoStar-Pro.ipa not found in Vds-Pro releases. Run Vds-Pro build first!"; exit 1; }
+          echo "Found asset, downloading..."
 
           curl -fL \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: Bearer $AUTH_TOKEN" \
             -H "Accept: application/octet-stream" \
             "$ASSET_URL" -o VideoStar-Pro.ipa --retry 3 --retry-delay 5
 
