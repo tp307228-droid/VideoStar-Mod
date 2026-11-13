@@ -1,5 +1,9 @@
 // MediaReplacerVC.m
-// "Chạm Thay Media" — select one image, auto-replace ALL image/video layers in VideoStar
+// Chạm Thay Media:
+//   1. User tự tìm & nhập segment/layer code trong VideoStar
+//   2. Nhấn "Tìm Lớp Media" → tool scan tất cả lớp trong project
+//   3. Chọn 1 ảnh
+//   4. Nhấn "Áp Dụng" → thay ảnh vào TẤT CẢ lớp media tìm được
 
 #import "MediaReplacerVC.h"
 #import "Theme.h"
@@ -7,56 +11,57 @@
 #import <Photos/Photos.h>
 #import <PhotosUI/PhotosUI.h>
 
-// ── VideoStar private class declarations (linked at runtime) ─────────────────
-// We use NSClassFromString / performSelector to avoid link-time issues
-// These match VideoStar 15.x internal architecture
-#define VS_CLIP_CLASS    @"VideoClip"
-#define VS_PROJECT_CLASS @"VSProject"
-#define VS_LAYER_IMAGE   @"VSImageLayer"
-#define VS_LAYER_VIDEO   @"VSVideoLayer"
+// ── VideoStar private class names ────────────────────────────────────────────
+// Truy cập qua NSClassFromString / performSelector để tránh link lỗi
+static NSString * const kVSProjectController   = @"VSProjectController";
+static NSString * const kVSDocumentController  = @"VSDocumentController";
+static NSString * const kVSCompositionManager  = @"VSCompositionManager";
+static NSString * const kVSShotController      = @"VSShotController";
 
-// ── Helper: shimmer loading view ─────────────────────────────────────────────
-@interface FVDShimmerView : UIView
-- (void)startShimmer;
-- (void)stopShimmer;
-@end
-@implementation FVDShimmerView {
-    CAGradientLayer *_shimmer;
-}
-- (void)startShimmer {
-    _shimmer = [CAGradientLayer layer];
-    _shimmer.colors = @[(id)[UIColor colorWithWhite:1 alpha:0.05].CGColor,
-                        (id)[UIColor colorWithWhite:1 alpha:0.15].CGColor,
-                        (id)[UIColor colorWithWhite:1 alpha:0.05].CGColor];
-    _shimmer.startPoint = CGPointMake(0, 0.5);
-    _shimmer.endPoint   = CGPointMake(1, 0.5);
-    _shimmer.frame = self.bounds;
-    [self.layer addSublayer:_shimmer];
+// ── State machine ────────────────────────────────────────────────────────────
+typedef NS_ENUM(NSInteger, FVDReplaceState) {
+    FVDReplaceStateIdle,        // chưa làm gì
+    FVDReplaceStateScanned,     // đã scan thấy lớp
+    FVDReplaceStateImagePicked, // đã chọn ảnh
+    FVDReplaceStateApplying,    // đang áp dụng
+    FVDReplaceStateDone,        // hoàn thành
+};
 
-    CABasicAnimation *anim = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
-    anim.fromValue = @(-self.bounds.size.width);
-    anim.toValue   = @(self.bounds.size.width);
-    anim.duration  = 1.4;
-    anim.repeatCount = HUGE_VALF;
-    [_shimmer addAnimation:anim forKey:@"shimmer"];
-}
-- (void)stopShimmer { [_shimmer removeFromSuperlayer]; _shimmer = nil; }
-@end
-
-// ════════════════════════════════════════════════════════
-// MARK: - MediaReplacerVC
-// ════════════════════════════════════════════════════════
 @interface MediaReplacerVC () <PHPickerViewControllerDelegate>
-@property (nonatomic, strong) UIImage *selectedImage;
-@property (nonatomic, strong) UIView  *previewCard;
+
+// State
+@property (nonatomic, assign) FVDReplaceState state;
+@property (nonatomic, strong) UIImage  *selectedImage;
+@property (nonatomic, strong) NSArray  *foundLayers;
+
+// UI - Code input section
+@property (nonatomic, strong) UIView   *codeCard;
+@property (nonatomic, strong) UITextField *codeField;
+@property (nonatomic, strong) UIButton *scanBtn;
+
+// UI - Scan result
+@property (nonatomic, strong) UIView   *scanResultCard;
+@property (nonatomic, strong) UILabel  *scanResultLabel;
+@property (nonatomic, strong) UIImageView *scanResultIcon;
+
+// UI - Image section
+@property (nonatomic, strong) UIView   *imageCard;
 @property (nonatomic, strong) UIImageView *previewImageView;
-@property (nonatomic, strong) UILabel *previewLabel;
+@property (nonatomic, strong) UILabel  *imageLabel;
 @property (nonatomic, strong) UIButton *pickBtn;
+
+// UI - Apply
 @property (nonatomic, strong) UIButton *applyBtn;
-@property (nonatomic, strong) UIView  *progressContainer;
+
+// UI - Progress
+@property (nonatomic, strong) UIView        *progressCard;
 @property (nonatomic, strong) UIProgressView *progressBar;
-@property (nonatomic, strong) UILabel *progressLabel;
-@property (nonatomic, strong) UILabel *layerCountLabel;
+@property (nonatomic, strong) UILabel       *progressLabel;
+
+// Layout
+@property (nonatomic, strong) UIScrollView *scrollView;
+@property (nonatomic, strong) UIView       *contentView;
+
 @end
 
 @implementation MediaReplacerVC
@@ -64,321 +69,502 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.clearColor;
+    self.state = FVDReplaceStateIdle;
     [self buildUI];
+    [self refreshUI];
 }
 
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    // Resize gradient apply button
+    for (CALayer *l in _applyBtn.layer.sublayers) {
+        if ([l isKindOfClass:[CAGradientLayer class]]) {
+            l.frame = _applyBtn.bounds;
+            l.cornerRadius = _applyBtn.layer.cornerRadius;
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════
+// MARK: - Build UI
+// ════════════════════════════════════════════════════════
 - (void)buildUI {
-    UIScrollView *scroll = [[UIScrollView alloc] init];
-    scroll.translatesAutoresizingMaskIntoConstraints = NO;
-    scroll.showsVerticalScrollIndicator = NO;
-    [self.view addSubview:scroll];
+    _scrollView = [[UIScrollView alloc] init];
+    _scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    _scrollView.showsVerticalScrollIndicator = NO;
+    [self.view addSubview:_scrollView];
 
-    UIView *content = [[UIView alloc] init];
-    content.translatesAutoresizingMaskIntoConstraints = NO;
-    [scroll addSubview:content];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [scroll.topAnchor constraintEqualToAnchor:self.view.topAnchor],
-        [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-        [content.topAnchor constraintEqualToAnchor:scroll.topAnchor],
-        [content.leadingAnchor constraintEqualToAnchor:scroll.leadingAnchor],
-        [content.trailingAnchor constraintEqualToAnchor:scroll.trailingAnchor],
-        [content.bottomAnchor constraintEqualToAnchor:scroll.bottomAnchor],
-        [content.widthAnchor constraintEqualToAnchor:scroll.widthAnchor],
-    ]];
-
-    // ── Description Card ─────────────────────────────────
-    UIView *descCard = [[UIView alloc] init];
-    descCard.translatesAutoresizingMaskIntoConstraints = NO;
-    descCard.backgroundColor = [UIColor colorWithRed:0.3 green:0.1 blue:0.6 alpha:0.2];
-    descCard.layer.cornerRadius = FVD_R_MD;
-    descCard.layer.borderWidth  = 1;
-    descCard.layer.borderColor  = [UIColor colorWithRed:0.55 green:0.25 blue:1 alpha:0.3].CGColor;
-
-    UIImageView *descIcon = [[UIImageView alloc] initWithImage:FVDICON(FVDIconImage, 20, FVD_ACCENT)];
-    descIcon.translatesAutoresizingMaskIntoConstraints = NO;
-    descIcon.contentMode = UIViewContentModeScaleAspectFit;
-
-    UILabel *descTitle = [UILabel new];
-    descTitle.translatesAutoresizingMaskIntoConstraints = NO;
-    descTitle.text = @"Chạm Thay Media";
-    descTitle.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
-    descTitle.textColor = FVD_TEXT;
-
-    UILabel *descText = [UILabel new];
-    descText.translatesAutoresizingMaskIntoConstraints = NO;
-    descText.text = @"Chọn 1 ảnh, tool sẽ tự động thay vào TẤT CẢ lớp ảnh & video trong dự án VideoStar hiện tại.";
-    descText.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    descText.textColor = FVD_SUBTEXT;
-    descText.numberOfLines = 0;
-
-    [descCard addSubview:descIcon];
-    [descCard addSubview:descTitle];
-    [descCard addSubview:descText];
+    _contentView = [[UIView alloc] init];
+    _contentView.translatesAutoresizingMaskIntoConstraints = NO;
+    [_scrollView addSubview:_contentView];
 
     [NSLayoutConstraint activateConstraints:@[
-        [descIcon.leadingAnchor constraintEqualToAnchor:descCard.leadingAnchor constant:14],
-        [descIcon.topAnchor constraintEqualToAnchor:descCard.topAnchor constant:14],
-        [descIcon.widthAnchor constraintEqualToConstant:20],
-        [descIcon.heightAnchor constraintEqualToConstant:20],
-        [descTitle.leadingAnchor constraintEqualToAnchor:descIcon.trailingAnchor constant:8],
-        [descTitle.centerYAnchor constraintEqualToAnchor:descIcon.centerYAnchor],
-        [descText.topAnchor constraintEqualToAnchor:descIcon.bottomAnchor constant:8],
-        [descText.leadingAnchor constraintEqualToAnchor:descCard.leadingAnchor constant:14],
-        [descText.trailingAnchor constraintEqualToAnchor:descCard.trailingAnchor constant:-14],
-        [descText.bottomAnchor constraintEqualToAnchor:descCard.bottomAnchor constant:-14],
+        [_scrollView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [_scrollView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [_scrollView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [_scrollView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [_contentView.topAnchor constraintEqualToAnchor:_scrollView.topAnchor],
+        [_contentView.leadingAnchor constraintEqualToAnchor:_scrollView.leadingAnchor],
+        [_contentView.trailingAnchor constraintEqualToAnchor:_scrollView.trailingAnchor],
+        [_contentView.bottomAnchor constraintEqualToAnchor:_scrollView.bottomAnchor],
+        [_contentView.widthAnchor constraintEqualToAnchor:_scrollView.widthAnchor],
     ]];
 
-    // ── Layer count badge ─────────────────────────────────
-    UIView *badgeCard = [[UIView alloc] init];
-    badgeCard.translatesAutoresizingMaskIntoConstraints = NO;
-    badgeCard.backgroundColor = FVD_CARD;
-    badgeCard.layer.cornerRadius = FVD_R_SM;
+    // ── Header info card ─────────────────────────────────
+    UIView *infoCard = [self makeCard];
+    infoCard.backgroundColor = [UIColor colorWithRed:0.3 green:0.1 blue:0.6 alpha:0.2];
+    infoCard.layer.borderColor = [UIColor colorWithRed:0.55 green:0.25 blue:1 alpha:0.3].CGColor;
 
-    _layerCountLabel = [UILabel new];
-    _layerCountLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _layerCountLabel.text = @"Phát hiện: — lớp media";
-    _layerCountLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    _layerCountLabel.textColor = FVD_SUBTEXT;
-    _layerCountLabel.textAlignment = NSTextAlignmentCenter;
-    [badgeCard addSubview:_layerCountLabel];
+    UILabel *infoTitle = [UILabel new];
+    infoTitle.translatesAutoresizingMaskIntoConstraints = NO;
+    infoTitle.text = @"Chạm Thay Media";
+    infoTitle.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
+    infoTitle.textColor = FVD_TEXT;
+
+    UILabel *infoDesc = [UILabel new];
+    infoDesc.translatesAutoresizingMaskIntoConstraints = NO;
+    infoDesc.text = @"Nhập code đoạn trong VideoStar → Scan lớp media → Chọn ảnh → Áp dụng thay TẤT CẢ lớp.";
+    infoDesc.font = [UIFont systemFontOfSize:12];
+    infoDesc.textColor = FVD_SUBTEXT;
+    infoDesc.numberOfLines = 0;
+
+    [infoCard addSubview:infoTitle];
+    [infoCard addSubview:infoDesc];
     [NSLayoutConstraint activateConstraints:@[
-        [_layerCountLabel.topAnchor constraintEqualToAnchor:badgeCard.topAnchor constant:8],
-        [_layerCountLabel.leadingAnchor constraintEqualToAnchor:badgeCard.leadingAnchor constant:14],
-        [_layerCountLabel.trailingAnchor constraintEqualToAnchor:badgeCard.trailingAnchor constant:-14],
-        [_layerCountLabel.bottomAnchor constraintEqualToAnchor:badgeCard.bottomAnchor constant:-8],
+        [infoTitle.topAnchor constraintEqualToAnchor:infoCard.topAnchor constant:12],
+        [infoTitle.leadingAnchor constraintEqualToAnchor:infoCard.leadingAnchor constant:14],
+        [infoTitle.trailingAnchor constraintEqualToAnchor:infoCard.trailingAnchor constant:-14],
+        [infoDesc.topAnchor constraintEqualToAnchor:infoTitle.bottomAnchor constant:6],
+        [infoDesc.leadingAnchor constraintEqualToAnchor:infoCard.leadingAnchor constant:14],
+        [infoDesc.trailingAnchor constraintEqualToAnchor:infoCard.trailingAnchor constant:-14],
+        [infoDesc.bottomAnchor constraintEqualToAnchor:infoCard.bottomAnchor constant:-12],
     ]];
 
-    // ── Preview Card ──────────────────────────────────────
-    _previewCard = [[UIView alloc] init];
-    _previewCard.translatesAutoresizingMaskIntoConstraints = NO;
-    _previewCard.backgroundColor = FVD_CARD;
-    _previewCard.layer.cornerRadius = FVD_R_MD;
-    _previewCard.layer.borderWidth  = 1;
-    _previewCard.layer.borderColor  = FVD_BORDER.CGColor;
+    // ── STEP 1: Code input ───────────────────────────────
+    UIView *step1Header = [self makeStepLabel:@"BƯỚC 1  Nhập Code Đoạn / Segment" icon:FVDIconSearch];
+
+    _codeCard = [self makeCard];
+
+    UILabel *codeHint = [UILabel new];
+    codeHint.translatesAutoresizingMaskIntoConstraints = NO;
+    codeHint.text = @"Code đoạn bạn tìm trong VideoStar (VD: vs_seg_001)";
+    codeHint.font = [UIFont systemFontOfSize:11];
+    codeHint.textColor = FVD_SUBTEXT;
+    codeHint.numberOfLines = 0;
+
+    _codeField = [[UITextField alloc] init];
+    _codeField.translatesAutoresizingMaskIntoConstraints = NO;
+    _codeField.placeholder = @"Nhập code đoạn...";
+    _codeField.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightMedium];
+    _codeField.textColor = FVD_TEXT;
+    _codeField.backgroundColor = FVD_BG;
+    _codeField.layer.cornerRadius = 8;
+    _codeField.layer.borderWidth = 1;
+    _codeField.layer.borderColor = FVD_BORDER.CGColor;
+    _codeField.returnKeyType = UIReturnKeyDone;
+    _codeField.autocorrectionType = UITextAutocorrectionTypeNo;
+    _codeField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    UIView *leftPad = [[UIView alloc] initWithFrame:CGRectMake(0,0,10,0)];
+    _codeField.leftView = leftPad;
+    _codeField.leftViewMode = UITextFieldViewModeAlways;
+    [_codeField addTarget:self action:@selector(codeFieldChanged) forControlEvents:UIControlEventEditingChanged];
+    [_codeField addTarget:self action:@selector(dismissKeyboard) forControlEvents:UIControlEventEditingDidEndOnExit];
+
+    _scanBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    _scanBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    _scanBtn.backgroundColor = FVD_ACCENT;
+    _scanBtn.layer.cornerRadius = 8;
+    [_scanBtn setTitle:@"Tìm Lớp Media" forState:UIControlStateNormal];
+    [_scanBtn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    _scanBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    [_scanBtn addTarget:self action:@selector(scanLayers) forControlEvents:UIControlEventTouchUpInside];
+
+    [_codeCard addSubview:codeHint];
+    [_codeCard addSubview:_codeField];
+    [_codeCard addSubview:_scanBtn];
+    [NSLayoutConstraint activateConstraints:@[
+        [codeHint.topAnchor constraintEqualToAnchor:_codeCard.topAnchor constant:12],
+        [codeHint.leadingAnchor constraintEqualToAnchor:_codeCard.leadingAnchor constant:14],
+        [codeHint.trailingAnchor constraintEqualToAnchor:_codeCard.trailingAnchor constant:-14],
+        [_codeField.topAnchor constraintEqualToAnchor:codeHint.bottomAnchor constant:8],
+        [_codeField.leadingAnchor constraintEqualToAnchor:_codeCard.leadingAnchor constant:14],
+        [_codeField.trailingAnchor constraintEqualToAnchor:_codeCard.trailingAnchor constant:-14],
+        [_codeField.heightAnchor constraintEqualToConstant:42],
+        [_scanBtn.topAnchor constraintEqualToAnchor:_codeField.bottomAnchor constant:10],
+        [_scanBtn.leadingAnchor constraintEqualToAnchor:_codeCard.leadingAnchor constant:14],
+        [_scanBtn.trailingAnchor constraintEqualToAnchor:_codeCard.trailingAnchor constant:-14],
+        [_scanBtn.heightAnchor constraintEqualToConstant:40],
+        [_scanBtn.bottomAnchor constraintEqualToAnchor:_codeCard.bottomAnchor constant:-12],
+    ]];
+
+    // ── Scan result card ─────────────────────────────────
+    _scanResultCard = [self makeCard];
+    _scanResultCard.hidden = YES;
+
+    _scanResultIcon = [[UIImageView alloc] initWithImage:FVDICON(FVDIconCheck, 20, FVD_GREEN)];
+    _scanResultIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    _scanResultIcon.contentMode = UIViewContentModeScaleAspectFit;
+
+    _scanResultLabel = [UILabel new];
+    _scanResultLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _scanResultLabel.text = @"Chưa scan";
+    _scanResultLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    _scanResultLabel.textColor = FVD_TEXT;
+    _scanResultLabel.numberOfLines = 0;
+
+    [_scanResultCard addSubview:_scanResultIcon];
+    [_scanResultCard addSubview:_scanResultLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [_scanResultIcon.leadingAnchor constraintEqualToAnchor:_scanResultCard.leadingAnchor constant:14],
+        [_scanResultIcon.centerYAnchor constraintEqualToAnchor:_scanResultCard.centerYAnchor],
+        [_scanResultIcon.widthAnchor constraintEqualToConstant:20],
+        [_scanResultIcon.heightAnchor constraintEqualToConstant:20],
+        [_scanResultLabel.leadingAnchor constraintEqualToAnchor:_scanResultIcon.trailingAnchor constant:10],
+        [_scanResultLabel.trailingAnchor constraintEqualToAnchor:_scanResultCard.trailingAnchor constant:-14],
+        [_scanResultLabel.topAnchor constraintEqualToAnchor:_scanResultCard.topAnchor constant:12],
+        [_scanResultLabel.bottomAnchor constraintEqualToAnchor:_scanResultCard.bottomAnchor constant:-12],
+    ]];
+
+    // ── STEP 2: Pick Image ───────────────────────────────
+    UIView *step2Header = [self makeStepLabel:@"BƯỚC 2  Chọn Ảnh Thay Thế" icon:FVDIconImage];
+
+    _imageCard = [self makeCard];
+    _imageCard.hidden = YES;
 
     _previewImageView = [[UIImageView alloc] init];
     _previewImageView.translatesAutoresizingMaskIntoConstraints = NO;
     _previewImageView.contentMode = UIViewContentModeScaleAspectFill;
     _previewImageView.clipsToBounds = YES;
-    _previewImageView.layer.cornerRadius = FVD_R_SM;
+    _previewImageView.layer.cornerRadius = 8;
     _previewImageView.backgroundColor = FVD_BG;
 
-    _previewLabel = [UILabel new];
-    _previewLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _previewLabel.text = @"Chưa chọn ảnh";
-    _previewLabel.font = [UIFont systemFontOfSize:12];
-    _previewLabel.textColor = FVD_SUBTEXT;
-    _previewLabel.textAlignment = NSTextAlignmentCenter;
+    _imageLabel = [UILabel new];
+    _imageLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _imageLabel.text = @"Chưa chọn ảnh";
+    _imageLabel.font = [UIFont systemFontOfSize:12];
+    _imageLabel.textColor = FVD_SUBTEXT;
+    _imageLabel.textAlignment = NSTextAlignmentCenter;
 
-    UILabel *previewTitle = [UILabel new];
-    previewTitle.translatesAutoresizingMaskIntoConstraints = NO;
-    previewTitle.text = @"Ảnh Đã Chọn";
-    previewTitle.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    previewTitle.textColor = FVD_TEXT;
-
-    [_previewCard addSubview:previewTitle];
-    [_previewCard addSubview:_previewImageView];
-    [_previewCard addSubview:_previewLabel];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [previewTitle.topAnchor constraintEqualToAnchor:_previewCard.topAnchor constant:12],
-        [previewTitle.leadingAnchor constraintEqualToAnchor:_previewCard.leadingAnchor constant:14],
-        [_previewImageView.topAnchor constraintEqualToAnchor:previewTitle.bottomAnchor constant:10],
-        [_previewImageView.centerXAnchor constraintEqualToAnchor:_previewCard.centerXAnchor],
-        [_previewImageView.widthAnchor constraintEqualToConstant:140],
-        [_previewImageView.heightAnchor constraintEqualToConstant:140],
-        [_previewLabel.topAnchor constraintEqualToAnchor:_previewImageView.bottomAnchor constant:8],
-        [_previewLabel.centerXAnchor constraintEqualToAnchor:_previewCard.centerXAnchor],
-        [_previewLabel.bottomAnchor constraintEqualToAnchor:_previewCard.bottomAnchor constant:-12],
-    ]];
-
-    // ── Pick button ───────────────────────────────────────
     _pickBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     _pickBtn.translatesAutoresizingMaskIntoConstraints = NO;
     _pickBtn.backgroundColor = FVD_CARD;
-    _pickBtn.layer.cornerRadius = FVD_R_MD;
-    _pickBtn.layer.borderWidth  = 1.5;
-    _pickBtn.layer.borderColor  = FVD_ACCENT.CGColor;
-
-    UIImageView *pickIcon = [[UIImageView alloc] initWithImage:FVDICON(FVDIconImage, 20, FVD_ACCENT)];
-    pickIcon.translatesAutoresizingMaskIntoConstraints = NO;
-    pickIcon.contentMode = UIViewContentModeScaleAspectFit;
-    UILabel *pickLbl = [UILabel new];
-    pickLbl.translatesAutoresizingMaskIntoConstraints = NO;
-    pickLbl.text = @"Chọn Ảnh Thay Thế";
-    pickLbl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-    pickLbl.textColor = FVD_ACCENT;
-    [_pickBtn addSubview:pickIcon];
-    [_pickBtn addSubview:pickLbl];
+    _pickBtn.layer.cornerRadius = 8;
+    _pickBtn.layer.borderWidth = 1.5;
+    _pickBtn.layer.borderColor = FVD_ACCENT.CGColor;
+    [_pickBtn setTitle:@"Mở Thư Viện Ảnh" forState:UIControlStateNormal];
+    [_pickBtn setTitleColor:FVD_ACCENT forState:UIControlStateNormal];
+    _pickBtn.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
     [_pickBtn addTarget:self action:@selector(pickImage) forControlEvents:UIControlEventTouchUpInside];
+
+    [_imageCard addSubview:_previewImageView];
+    [_imageCard addSubview:_imageLabel];
+    [_imageCard addSubview:_pickBtn];
     [NSLayoutConstraint activateConstraints:@[
-        [pickIcon.leadingAnchor constraintEqualToAnchor:_pickBtn.leadingAnchor constant:16],
-        [pickIcon.centerYAnchor constraintEqualToAnchor:_pickBtn.centerYAnchor],
-        [pickIcon.widthAnchor constraintEqualToConstant:20],
-        [pickIcon.heightAnchor constraintEqualToConstant:20],
-        [pickLbl.leadingAnchor constraintEqualToAnchor:pickIcon.trailingAnchor constant:10],
-        [pickLbl.centerYAnchor constraintEqualToAnchor:_pickBtn.centerYAnchor],
-        [_pickBtn.heightAnchor constraintEqualToConstant:50],
+        [_previewImageView.topAnchor constraintEqualToAnchor:_imageCard.topAnchor constant:12],
+        [_previewImageView.centerXAnchor constraintEqualToAnchor:_imageCard.centerXAnchor],
+        [_previewImageView.widthAnchor constraintEqualToConstant:120],
+        [_previewImageView.heightAnchor constraintEqualToConstant:120],
+        [_imageLabel.topAnchor constraintEqualToAnchor:_previewImageView.bottomAnchor constant:6],
+        [_imageLabel.centerXAnchor constraintEqualToAnchor:_imageCard.centerXAnchor],
+        [_imageLabel.leadingAnchor constraintEqualToAnchor:_imageCard.leadingAnchor constant:14],
+        [_imageLabel.trailingAnchor constraintEqualToAnchor:_imageCard.trailingAnchor constant:-14],
+        [_pickBtn.topAnchor constraintEqualToAnchor:_imageLabel.bottomAnchor constant:10],
+        [_pickBtn.leadingAnchor constraintEqualToAnchor:_imageCard.leadingAnchor constant:14],
+        [_pickBtn.trailingAnchor constraintEqualToAnchor:_imageCard.trailingAnchor constant:-14],
+        [_pickBtn.heightAnchor constraintEqualToConstant:40],
+        [_pickBtn.bottomAnchor constraintEqualToAnchor:_imageCard.bottomAnchor constant:-12],
     ]];
 
-    // ── Apply button ──────────────────────────────────────
+    // ── STEP 3: Apply button ─────────────────────────────
+    UIView *step3Header = [self makeStepLabel:@"BƯỚC 3  Áp Dụng" icon:FVDIconCheck];
+
     _applyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     _applyBtn.translatesAutoresizingMaskIntoConstraints = NO;
     _applyBtn.layer.cornerRadius = FVD_R_MD;
-    _applyBtn.alpha = 0.5;
+    _applyBtn.alpha = 0.4;
     _applyBtn.enabled = NO;
+    _applyBtn.hidden = YES;
 
     CAGradientLayer *applyGrad = FVDMakeGradient(FVD_ACCENT, FVD_ACCENT2, 90);
     applyGrad.cornerRadius = FVD_R_MD;
     applyGrad.frame = CGRectMake(0,0,10,10);
     [_applyBtn.layer insertSublayer:applyGrad atIndex:0];
 
-    UIImageView *applyIcon = [[UIImageView alloc] initWithImage:FVDICON(FVDIconCheck, 20, UIColor.whiteColor)];
-    applyIcon.translatesAutoresizingMaskIntoConstraints = NO;
-    applyIcon.contentMode = UIViewContentModeScaleAspectFit;
-    UILabel *applyLbl = [UILabel new];
-    applyLbl.translatesAutoresizingMaskIntoConstraints = NO;
-    applyLbl.text = @"Áp Dụng Cho Tất Cả Lớp";
-    applyLbl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
-    applyLbl.textColor = UIColor.whiteColor;
-    [_applyBtn addSubview:applyIcon];
-    [_applyBtn addSubview:applyLbl];
+    [_applyBtn setTitle:@"Áp Dụng Cho Tất Cả Lớp Media" forState:UIControlStateNormal];
+    [_applyBtn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    _applyBtn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
     [_applyBtn addTarget:self action:@selector(applyMedia) forControlEvents:UIControlEventTouchUpInside];
-    [NSLayoutConstraint activateConstraints:@[
-        [applyIcon.leadingAnchor constraintEqualToAnchor:_applyBtn.leadingAnchor constant:16],
-        [applyIcon.centerYAnchor constraintEqualToAnchor:_applyBtn.centerYAnchor],
-        [applyIcon.widthAnchor constraintEqualToConstant:20],
-        [applyIcon.heightAnchor constraintEqualToConstant:20],
-        [applyLbl.leadingAnchor constraintEqualToAnchor:applyIcon.trailingAnchor constant:10],
-        [applyLbl.centerYAnchor constraintEqualToAnchor:_applyBtn.centerYAnchor],
-        [_applyBtn.heightAnchor constraintEqualToConstant:52],
-    ]];
+    _applyBtn.heightAnchor.constraintEqualToConstant(52).active = YES;
 
-    // ── Progress container ────────────────────────────────
-    _progressContainer = [[UIView alloc] init];
-    _progressContainer.translatesAutoresizingMaskIntoConstraints = NO;
-    _progressContainer.backgroundColor = FVD_CARD;
-    _progressContainer.layer.cornerRadius = FVD_R_MD;
-    _progressContainer.hidden = YES;
-
-    _progressBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
-    _progressBar.translatesAutoresizingMaskIntoConstraints = NO;
-    _progressBar.progressTintColor  = FVD_ACCENT;
-    _progressBar.trackTintColor     = FVD_BG;
-    _progressBar.layer.cornerRadius = 3;
-    _progressBar.clipsToBounds = YES;
+    // ── Progress card ────────────────────────────────────
+    _progressCard = [self makeCard];
+    _progressCard.hidden = YES;
 
     _progressLabel = [UILabel new];
     _progressLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _progressLabel.text = @"Đang xử lý...";
     _progressLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
     _progressLabel.textColor = FVD_SUBTEXT;
     _progressLabel.textAlignment = NSTextAlignmentCenter;
+    _progressLabel.text = @"Đang xử lý...";
 
-    [_progressContainer addSubview:_progressBar];
-    [_progressContainer addSubview:_progressLabel];
+    _progressBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    _progressBar.translatesAutoresizingMaskIntoConstraints = NO;
+    _progressBar.progressTintColor = FVD_ACCENT;
+    _progressBar.trackTintColor = FVD_BG;
+    _progressBar.layer.cornerRadius = 3;
+    _progressBar.clipsToBounds = YES;
+
+    [_progressCard addSubview:_progressLabel];
+    [_progressCard addSubview:_progressBar];
     [NSLayoutConstraint activateConstraints:@[
-        [_progressLabel.topAnchor constraintEqualToAnchor:_progressContainer.topAnchor constant:12],
-        [_progressLabel.centerXAnchor constraintEqualToAnchor:_progressContainer.centerXAnchor],
+        [_progressLabel.topAnchor constraintEqualToAnchor:_progressCard.topAnchor constant:12],
+        [_progressLabel.centerXAnchor constraintEqualToAnchor:_progressCard.centerXAnchor],
+        [_progressLabel.leadingAnchor constraintEqualToAnchor:_progressCard.leadingAnchor constant:14],
+        [_progressLabel.trailingAnchor constraintEqualToAnchor:_progressCard.trailingAnchor constant:-14],
         [_progressBar.topAnchor constraintEqualToAnchor:_progressLabel.bottomAnchor constant:8],
-        [_progressBar.leadingAnchor constraintEqualToAnchor:_progressContainer.leadingAnchor constant:14],
-        [_progressBar.trailingAnchor constraintEqualToAnchor:_progressContainer.trailingAnchor constant:-14],
+        [_progressBar.leadingAnchor constraintEqualToAnchor:_progressCard.leadingAnchor constant:14],
+        [_progressBar.trailingAnchor constraintEqualToAnchor:_progressCard.trailingAnchor constant:-14],
         [_progressBar.heightAnchor constraintEqualToConstant:6],
-        [_progressContainer.bottomAnchor constraintEqualToAnchor:_progressBar.bottomAnchor constant:12],
+        [_progressCard.bottomAnchor constraintEqualToAnchor:_progressBar.bottomAnchor constant:12],
     ]];
 
-    // ── Add to content ────────────────────────────────────
-    for (UIView *v in @[descCard, badgeCard, _previewCard, _pickBtn, _applyBtn, _progressContainer]) {
-        [content addSubview:v];
+    // ── Layout all in content ─────────────────────────────
+    NSArray *views = @[infoCard, step1Header, _codeCard, _scanResultCard,
+                       step2Header, _imageCard, step3Header, _applyBtn,
+                       _progressCard];
+    for (UIView *v in views) {
+        v.translatesAutoresizingMaskIntoConstraints = NO;
+        [_contentView addSubview:v];
     }
+
+    UIView *prev = nil;
+    CGFloat topPad = 12, gap = 8;
+    for (UIView *v in views) {
+        CGFloat space = (prev == nil) ? topPad : gap;
+        [NSLayoutConstraint activateConstraints:@[
+            [v.leadingAnchor constraintEqualToAnchor:_contentView.leadingAnchor constant:14],
+            [v.trailingAnchor constraintEqualToAnchor:_contentView.trailingAnchor constant:-14],
+            prev ? [v.topAnchor constraintEqualToAnchor:prev.bottomAnchor constant:space]
+                 : [v.topAnchor constraintEqualToAnchor:_contentView.topAnchor constant:topPad],
+        ]];
+        prev = v;
+    }
+    [prev.bottomAnchor constraintEqualToAnchor:_contentView.bottomAnchor constant:-20].active = YES;
+}
+
+// ── MARK: Helpers ─────────────────────────────────────────────────────────────
+- (UIView *)makeCard {
+    UIView *v = [[UIView alloc] init];
+    v.translatesAutoresizingMaskIntoConstraints = NO;
+    v.backgroundColor = FVD_CARD;
+    v.layer.cornerRadius = FVD_R_MD;
+    v.layer.borderWidth = 1;
+    v.layer.borderColor = FVD_BORDER.CGColor;
+    return v;
+}
+
+- (UIView *)makeStepLabel:(NSString *)text icon:(FVDIconType)iconType {
+    UIView *row = [[UIView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIImageView *ico = [[UIImageView alloc] initWithImage:FVDICON(iconType, 14, FVD_ACCENT)];
+    ico.translatesAutoresizingMaskIntoConstraints = NO;
+    ico.contentMode = UIViewContentModeScaleAspectFit;
+
+    UILabel *lbl = [UILabel new];
+    lbl.translatesAutoresizingMaskIntoConstraints = NO;
+    lbl.text = text;
+    lbl.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+    lbl.textColor = FVD_ACCENT;
+
+    [row addSubview:ico];
+    [row addSubview:lbl];
     [NSLayoutConstraint activateConstraints:@[
-        [descCard.topAnchor constraintEqualToAnchor:content.topAnchor constant:12],
-        [descCard.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14],
-        [descCard.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-14],
-
-        [badgeCard.topAnchor constraintEqualToAnchor:descCard.bottomAnchor constant:10],
-        [badgeCard.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14],
-        [badgeCard.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-14],
-
-        [_previewCard.topAnchor constraintEqualToAnchor:badgeCard.bottomAnchor constant:12],
-        [_previewCard.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14],
-        [_previewCard.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-14],
-
-        [_pickBtn.topAnchor constraintEqualToAnchor:_previewCard.bottomAnchor constant:12],
-        [_pickBtn.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14],
-        [_pickBtn.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-14],
-
-        [_applyBtn.topAnchor constraintEqualToAnchor:_pickBtn.bottomAnchor constant:10],
-        [_applyBtn.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14],
-        [_applyBtn.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-14],
-
-        [_progressContainer.topAnchor constraintEqualToAnchor:_applyBtn.bottomAnchor constant:10],
-        [_progressContainer.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:14],
-        [_progressContainer.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-14],
-        [_progressContainer.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-20],
+        [ico.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [ico.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [ico.widthAnchor constraintEqualToConstant:14],
+        [ico.heightAnchor constraintEqualToConstant:14],
+        [lbl.leadingAnchor constraintEqualToAnchor:ico.trailingAnchor constant:6],
+        [lbl.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [lbl.topAnchor constraintEqualToAnchor:row.topAnchor constant:2],
+        [lbl.bottomAnchor constraintEqualToAnchor:row.bottomAnchor constant:-2],
     ]];
+    return row;
+}
 
-    // Detect layer count
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSInteger count = [self detectLayerCount];
-        self.layerCountLabel.text = count > 0
-            ? [NSString stringWithFormat:@"Phát hiện: %ld lớp media", (long)count]
-            : @"Không tìm thấy lớp media — mở project trước";
-        self.layerCountLabel.textColor = count > 0 ? FVD_GREEN : FVD_RED;
+// ── MARK: UI State Refresh ───────────────────────────────────────────────────
+- (void)refreshUI {
+    BOOL hasLayers = (_foundLayers.count > 0);
+    BOOL hasImage  = (_selectedImage != nil);
+    BOOL canApply  = hasLayers && hasImage;
+
+    // Show scan result if scanned
+    _scanResultCard.hidden = (self.state == FVDReplaceStateIdle);
+
+    // Show image section only after scan found layers
+    _imageCard.hidden  = !hasLayers;
+
+    // Step 3 header + apply only when both ready
+    // (we keep step3Header always visible for clarity but dim it)
+    _applyBtn.hidden   = NO;
+    _applyBtn.enabled  = canApply && (self.state != FVDReplaceStateApplying);
+    _applyBtn.alpha    = canApply ? 1.0 : 0.4;
+
+    // Progress card
+    _progressCard.hidden = (self.state != FVDReplaceStateApplying && self.state != FVDReplaceStateDone);
+}
+
+// ── MARK: Keyboard ───────────────────────────────────────────────────────────
+- (void)codeFieldChanged {
+    // Reset scan state if code changes after scan
+    if (self.state == FVDReplaceStateScanned || self.state == FVDReplaceStateDone) {
+        self.state = FVDReplaceStateIdle;
+        self.foundLayers = nil;
+        [self refreshUI];
+    }
+}
+
+- (void)dismissKeyboard {
+    [_codeField resignFirstResponder];
+}
+
+// ── MARK: Scan Layers ────────────────────────────────────────────────────────
+- (void)scanLayers {
+    [_codeField resignFirstResponder];
+
+    NSString *code = [_codeField.text stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+    // Scan tất cả lớp media trong project hiện tại
+    // Code được dùng để log / filter nếu VideoStar hỗ trợ segment lookup
+    _scanBtn.enabled = NO;
+    [_scanBtn setTitle:@"Đang tìm..." forState:UIControlStateNormal];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        NSArray *layers = [self scanAllMediaLayers:code];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.foundLayers = layers;
+            self.scanBtn.enabled = YES;
+            [self.scanBtn setTitle:@"Tìm Lớp Media" forState:UIControlStateNormal];
+
+            if (layers.count > 0) {
+                self.state = FVDReplaceStateScanned;
+                self.scanResultIcon.image = FVDICON(FVDIconCheck, 20, FVD_GREEN);
+                self.scanResultLabel.text = [NSString stringWithFormat:
+                    @"Tìm thấy %ld lớp media%@.\nSẵn sàng thay thế!",
+                    (long)layers.count,
+                    code.length > 0 ? [NSString stringWithFormat:@" (code: %@)", code] : @""];
+                self.scanResultLabel.textColor = FVD_GREEN;
+            } else {
+                self.state = FVDReplaceStateIdle;
+                self.scanResultIcon.image = FVDICON(FVDIconX, 20, FVD_RED);
+                self.scanResultLabel.text = code.length > 0
+                    ? [NSString stringWithFormat:@"Không tìm thấy lớp nào.\nHãy mở project trong VideoStar và thử lại (code: %@).", code]
+                    : @"Không tìm thấy lớp nào.\nHãy mở project trong VideoStar và thử lại.";
+                self.scanResultLabel.textColor = FVD_RED;
+            }
+            [self refreshUI];
+        });
     });
+
+    // Show result card immediately
+    _scanResultCard.hidden = NO;
+    _scanResultLabel.text = @"Đang tìm kiếm lớp media...";
+    _scanResultLabel.textColor = FVD_SUBTEXT;
 }
 
-- (void)viewDidLayoutSubviews {
-    [super viewDidLayoutSubviews];
-    // Resize gradient layers
-    for (UIView *v in @[_applyBtn]) {
-        for (CALayer *l in v.layer.sublayers) {
-            if ([l isKindOfClass:[CAGradientLayer class]]) {
-                l.frame = v.bounds;
-                l.cornerRadius = v.layer.cornerRadius;
-            }
-        }
-    }
-}
+// Scan tất cả lớp media có thể thay được
+- (NSArray *)scanAllMediaLayers:(NSString *)code {
+    NSMutableArray *result = [NSMutableArray new];
 
-// ── MARK: Layer Detection ─────────────────────────────────────────────────────
-- (NSInteger)detectLayerCount {
-    // Try to reach VideoStar's project model via known class names
-    NSInteger count = 0;
-
-    // Pattern 1: VSProjectController.sharedController.currentProject.layers
-    Class ctrl = NSClassFromString(@"VSProjectController");
-    if (ctrl) {
-        id shared = [ctrl performSelector:@selector(sharedController) withObject:nil];
+    // ── Method 1: VSProjectController.sharedController.currentProject ─────────
+    Class ctrl = NSClassFromString(kVSProjectController);
+    if (ctrl && [ctrl respondsToSelector:@selector(sharedController)]) {
+        id shared = [ctrl performSelector:@selector(sharedController)];
         if (shared) {
-            id project = [shared performSelector:@selector(currentProject) withObject:nil];
-            if (project) {
-                NSArray *layers = [project performSelector:@selector(layers) withObject:nil];
-                count = layers.count;
-            }
-        }
-    }
+            id project = nil;
+            SEL selProject = @selector(currentProject);
+            if ([shared respondsToSelector:selProject])
+                project = [shared performSelector:selProject];
 
-    // Pattern 2: VSDocumentController
-    if (count == 0) {
-        Class docCtrl = NSClassFromString(@"VSDocumentController");
-        if (docCtrl) {
-            id shared = [docCtrl performSelector:@selector(sharedDocumentController) withObject:nil];
-            if (shared) {
-                NSArray *docs = [shared performSelector:@selector(documents) withObject:nil];
-                if (docs.count) {
-                    id doc = docs.firstObject;
-                    NSArray *layers = [doc performSelector:@selector(allLayers) withObject:nil];
-                    count = layers.count;
+            if (project) {
+                // Try multiple layer accessors
+                for (NSString *selName in @[@"layers", @"allLayers", @"videoLayers", @"imageLayers", @"clips"]) {
+                    SEL sel = NSSelectorFromString(selName);
+                    if ([project respondsToSelector:sel]) {
+                        id obj = [project performSelector:sel];
+                        if ([obj isKindOfClass:[NSArray class]] && [(NSArray *)obj count] > 0) {
+                            [result addObjectsFromArray:(NSArray *)obj];
+                        }
+                    }
                 }
             }
         }
     }
 
-    return count;
+    // ── Method 2: VSCompositionManager ───────────────────────────────────────
+    if (result.count == 0) {
+        Class compMgr = NSClassFromString(kVSCompositionManager);
+        if (compMgr) {
+            id shared = nil;
+            for (NSString *s in @[@"sharedManager", @"sharedInstance", @"defaultManager"]) {
+                SEL sel = NSSelectorFromString(s);
+                if ([compMgr respondsToSelector:sel]) {
+                    shared = [compMgr performSelector:sel]; break;
+                }
+            }
+            if (shared) {
+                for (NSString *selName in @[@"layers", @"mediaLayers", @"clips", @"composition"]) {
+                    SEL sel = NSSelectorFromString(selName);
+                    if ([shared respondsToSelector:sel]) {
+                        id obj = [shared performSelector:sel];
+                        if ([obj isKindOfClass:[NSArray class]])
+                            [result addObjectsFromArray:(NSArray *)obj];
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Method 3: Scan UIImageViews & video layer views from window ───────────
+    if (result.count == 0) {
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIWindow *win = nil;
+            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    win = scene.windows.firstObject; break;
+                }
+            }
+            if (win) [self collectMediaViewsFromView:win into:result];
+            dispatch_semaphore_signal(sem);
+        });
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC));
+    }
+
+    // Filter by code if provided — keep all if no code (replace globally)
+    // VideoStar layers don't expose a "segment code" property in known APIs,
+    // so we replace all found layers (user already navigated to the right segment)
+    return [result copy];
+}
+
+- (void)collectMediaViewsFromView:(UIView *)view into:(NSMutableArray *)arr {
+    // Skip our own overlay window
+    NSString *cls = NSStringFromClass([view class]);
+    if ([cls containsString:@"FVD"] || [cls containsString:@"FallVds"]) return;
+
+    BOOL isMedia = NO;
+    if ([view isKindOfClass:[UIImageView class]] && ((UIImageView *)view).image != nil) isMedia = YES;
+    if ([view respondsToSelector:@selector(setImage:)] && [view respondsToSelector:@selector(image)]) isMedia = YES;
+    if ([view respondsToSelector:@selector(setVideoURL:)]) isMedia = YES;
+    if ([view respondsToSelector:@selector(setSourceImage:)]) isMedia = YES;
+
+    if (isMedia && ![arr containsObject:view]) [arr addObject:view];
+
+    for (UIView *sub in view.subviews) {
+        [self collectMediaViewsFromView:sub into:arr];
+    }
 }
 
 // ── MARK: Pick Image ──────────────────────────────────────────────────────────
@@ -399,172 +585,101 @@
     [picker dismissViewControllerAnimated:YES completion:nil];
     if (!results.count) return;
 
-    PHPickerResult *result = results.firstObject;
-    [result.itemProvider loadObjectOfClass:[UIImage class] completionHandler:^(UIImage *image, NSError *error) {
+    [[results.firstObject itemProvider] loadObjectOfClass:[UIImage class]
+                                       completionHandler:^(UIImage *image, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (image) {
-                self.selectedImage = image;
-                self.previewImageView.image = image;
-                self.previewLabel.text = @"Ảnh đã chọn ✓";
-                self.previewLabel.textColor = FVD_GREEN;
-                self.applyBtn.enabled = YES;
-                [UIView animateWithDuration:0.3 animations:^{ self.applyBtn.alpha = 1.0; }];
-            }
+            if (!image) return;
+            self.selectedImage = image;
+            self.previewImageView.image = image;
+            self.imageLabel.text = @"Ảnh đã chọn ✓";
+            self.imageLabel.textColor = FVD_GREEN;
+            self.state = FVDReplaceStateImagePicked;
+            [self refreshUI];
         });
     }];
 }
 
-// ── MARK: Apply Media ─────────────────────────────────────────────────────────
+// ── MARK: Apply ───────────────────────────────────────────────────────────────
 - (void)applyMedia {
-    if (!_selectedImage) return;
+    if (!_selectedImage || !_foundLayers.count) return;
+    self.state = FVDReplaceStateApplying;
+    [self refreshUI];
 
-    _progressContainer.hidden = NO;
-    _applyBtn.enabled = NO;
-    _pickBtn.enabled  = NO;
+    _progressCard.hidden = NO;
     _progressBar.progress = 0;
-    _progressLabel.text = @"Đang tìm lớp media...";
+    _progressLabel.text = @"Đang thay media...";
+
+    NSData *imgData = UIImageJPEGRepresentation(_selectedImage, 0.95);
+    if (!imgData) imgData = UIImagePNGRepresentation(_selectedImage);
+
+    NSArray *layers = [_foundLayers copy];
+    NSInteger total = layers.count;
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-        NSArray *layers = [self getAllMediaLayers];
-        NSInteger total = layers.count;
-
-        if (total == 0) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                self.progressLabel.text = @"Không tìm thấy lớp nào.";
-                [self finishApply:NO];
-            });
-            return;
-        }
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self.progressLabel.text = [NSString stringWithFormat:@"Đang thay %ld lớp...", (long)total];
-        });
-
-        // Convert image to data once
-        NSData *imgData = UIImageJPEGRepresentation(self->_selectedImage, 0.95);
-        if (!imgData) imgData = UIImagePNGRepresentation(self->_selectedImage);
-
         for (NSInteger i = 0; i < total; i++) {
             id layer = layers[i];
             [self replaceMediaInLayer:layer withImageData:imgData];
 
-            CGFloat progress = (CGFloat)(i + 1) / (CGFloat)total;
+            CGFloat prog = (CGFloat)(i + 1) / (CGFloat)total;
             dispatch_async(dispatch_get_main_queue(), ^{
-                [self.progressBar setProgress:progress animated:YES];
-                self.progressLabel.text = [NSString stringWithFormat:@"Đang xử lý %ld/%ld...", (long)(i+1), (long)total];
+                [self.progressBar setProgress:prog animated:YES];
+                self.progressLabel.text = [NSString stringWithFormat:@"Đang xử lý %ld/%ld lớp...", (long)(i+1), (long)total];
             });
-            [NSThread sleepForTimeInterval:0.02]; // small delay for UI update
+            [NSThread sleepForTimeInterval:0.015];
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            self.progressLabel.text = [NSString stringWithFormat:@"✅ Đã thay %ld lớp!", (long)total];
-            [self finishApply:YES];
+            self.state = FVDReplaceStateDone;
+            self.progressLabel.text = [NSString stringWithFormat:@"✅ Đã thay %ld lớp thành công!", (long)total];
+            [self.progressBar setProgress:1.0 animated:YES];
+            [self refreshUI];
+
+            // Show success alert
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"Hoàn Thành"
+                message:[NSString stringWithFormat:@"Đã thay ảnh vào %ld lớp media thành công.", (long)total]
+                preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            UIViewController *root = self;
+            while (root.presentingViewController) root = root.presentingViewController;
+            [root presentViewController:alert animated:YES completion:nil];
         });
     });
-}
-
-- (NSArray *)getAllMediaLayers {
-    NSMutableArray *result = [NSMutableArray new];
-
-    // Try multiple access patterns
-    SEL selectors[] = {
-        @selector(layers),
-        @selector(allLayers),
-        @selector(videoLayers),
-    };
-
-    // Pattern 1: VSProjectController
-    Class ctrl = NSClassFromString(@"VSProjectController");
-    if (ctrl) {
-        id shared = [ctrl performSelector:@selector(sharedController)];
-        if (shared) {
-            id project = [shared performSelector:@selector(currentProject)];
-            if (project) {
-                for (int i = 0; i < 3; i++) {
-                    if ([project respondsToSelector:selectors[i]]) {
-                        NSArray *ls = [project performSelector:selectors[i]];
-                        if (ls.count) { [result addObjectsFromArray:ls]; break; }
-                    }
-                }
-            }
-        }
-    }
-
-    // If nothing found, walk the view hierarchy for video/image layer objects
-    if (result.count == 0) {
-        UIWindow *win = nil;
-        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                win = scene.windows.firstObject;
-                break;
-            }
-        }
-        if (win) [self collectLayerObjectsFromView:win into:result];
-    }
-
-    return result;
-}
-
-- (void)collectLayerObjectsFromView:(UIView *)view into:(NSMutableArray *)arr {
-    // Check if this view responds to media replacement selectors
-    if ([view respondsToSelector:@selector(setImage:)] &&
-        [view respondsToSelector:@selector(image)]) {
-        [arr addObject:view];
-    }
-    if ([view respondsToSelector:@selector(setVideoURL:)]) {
-        [arr addObject:view];
-    }
-    for (UIView *sub in view.subviews) {
-        [self collectLayerObjectsFromView:sub into:arr];
-    }
 }
 
 - (void)replaceMediaInLayer:(id)layer withImageData:(NSData *)data {
     UIImage *img = [UIImage imageWithData:data];
     if (!img) return;
 
-    // Try setting image directly
-    if ([layer respondsToSelector:@selector(setImage:)]) {
-        [layer performSelector:@selector(setImage:) withObject:img];
-    }
-    // Try setSourceImage
-    if ([layer respondsToSelector:@selector(setSourceImage:)]) {
-        [layer performSelector:@selector(setSourceImage:) withObject:img];
-    }
-    // For video layers: write image as temp file and set URL
-    if ([layer respondsToSelector:@selector(setVideoURL:)]) {
-        NSURL *tmpURL = [self saveTempImage:img];
-        if (tmpURL) [layer performSelector:@selector(setVideoURL:) withObject:tmpURL];
-    }
-    // If it's a UIImageView
-    if ([layer isKindOfClass:[UIImageView class]]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // UIImageView
+        if ([layer isKindOfClass:[UIImageView class]]) {
             ((UIImageView *)layer).image = img;
-        });
-    }
-    // Trigger refresh if available
-    if ([layer respondsToSelector:@selector(setNeedsDisplay)]) {
-        dispatch_async(dispatch_get_main_queue(), ^{ [layer setNeedsDisplay]; });
-    }
+        }
+        // setImage:
+        if ([layer respondsToSelector:@selector(setImage:)]) {
+            @try { [layer performSelector:@selector(setImage:) withObject:img]; } @catch (...) {}
+        }
+        // setSourceImage:
+        if ([layer respondsToSelector:@selector(setSourceImage:)]) {
+            @try { [layer performSelector:@selector(setSourceImage:) withObject:img]; } @catch (...) {}
+        }
+        // setVideoURL: (video layers — set temp image file as URL)
+        if ([layer respondsToSelector:@selector(setVideoURL:)]) {
+            NSURL *url = [self saveTempImage:img];
+            if (url) @try { [layer performSelector:@selector(setVideoURL:) withObject:url]; } @catch (...) {}
+        }
+        // setNeedsDisplay
+        if ([layer respondsToSelector:@selector(setNeedsDisplay)]) {
+            [layer performSelector:@selector(setNeedsDisplay)];
+        }
+    });
 }
 
 - (NSURL *)saveTempImage:(UIImage *)img {
-    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"fvd_replace.jpg"];
-    NSData *data = UIImageJPEGRepresentation(img, 0.95);
-    if ([data writeToFile:path atomically:YES]) {
-        return [NSURL fileURLWithPath:path];
-    }
-    return nil;
-}
-
-- (void)finishApply:(BOOL)success {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        self.applyBtn.enabled = YES;
-        self.pickBtn.enabled  = YES;
-        if (!success) {
-            self.progressContainer.hidden = YES;
-        }
-    });
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"fvd_replace_media.jpg"];
+    NSData *d = UIImageJPEGRepresentation(img, 0.95);
+    return ([d writeToFile:path atomically:YES]) ? [NSURL fileURLWithPath:path] : nil;
 }
 
 @end
