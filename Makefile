@@ -15,7 +15,7 @@ FallVdsTool_FILES = \
 	FallVdsTool/MediaReplacerVC.m \
 	FallVdsTool/QRImporterVC.m
 
-FallVdsTool_CFLAGS  = -fobjc-arc -I./FallVdsTool
+FallVdsTool_CFLAGS  = -fobjc-arc -I./FallVdsTool -Wno-deprecated-declarations -Wno-error
 FallVdsTool_FRAMEWORKS = \
 	UIKit CoreGraphics Foundation \
 	AVFoundation Photos PhotosUI \
