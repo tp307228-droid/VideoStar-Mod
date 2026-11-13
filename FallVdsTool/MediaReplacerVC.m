@@ -1,21 +1,22 @@
 // MediaReplacerVC.m
-// Flow: tap tab → auto mở VideoStar's own media picker (cái bình thường khi bấm thay media)
-//       chọn xong → auto thay TẤT CẢ lớp → không bấm gì thêm
+// Flow:
+//   User đang ở màn hình nhập nhiều lớp trong VideoStar
+//   Mở tab này → auto scan màn hình HIỆN TẠI đang hiển thị → tìm tất cả lớp media
+//   Hiện picker ảnh → chọn xong → thay ALL lớp tìm được → xong
 
 #import "MediaReplacerVC.h"
 #import "Theme.h"
 #import "SVGIcons.h"
-#import <objc/runtime.h>
 #import <Photos/Photos.h>
 #import <PhotosUI/PhotosUI.h>
 
-// ════════════════════════════════════════════════════════
-// MARK: - MediaReplacerVC
-// ════════════════════════════════════════════════════════
 @interface MediaReplacerVC () <PHPickerViewControllerDelegate>
-@property (nonatomic, strong) UILabel *statusLabel;
-@property (nonatomic, strong) UIActivityIndicatorView *spinner;
-@property (nonatomic, assign) BOOL didOpenPicker;
+@property (nonatomic, strong) NSMutableArray *foundLayers;   // các lớp media tìm thấy trên màn hình VS
+@property (nonatomic, strong) UILabel        *countLabel;
+@property (nonatomic, strong) UILabel        *statusLabel;
+@property (nonatomic, strong) UIButton       *pickBtn;
+@property (nonatomic, strong) UIProgressView *progressBar;
+@property (nonatomic, strong) UILabel        *progressLabel;
 @end
 
 @implementation MediaReplacerVC
@@ -23,189 +24,269 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.clearColor;
-    [self buildMinimalUI];
+    self.foundLayers = [NSMutableArray new];
+    [self buildUI];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
-    if (!self.didOpenPicker) {
-        self.didOpenPicker = YES;
-        [self openVSMediaPicker];
-    }
+    // Auto scan ngay khi mở tab
+    [self scanCurrentScreen];
 }
 
-- (void)buildMinimalUI {
-    _spinner = [[UIActivityIndicatorView alloc]
-        initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
-    _spinner.translatesAutoresizingMaskIntoConstraints = NO;
-    _spinner.color = FVD_ACCENT;
-    [_spinner startAnimating];
+// ════════════════════════════════════════════════════════
+// MARK: - UI
+// ════════════════════════════════════════════════════════
+- (void)buildUI {
+    UIScrollView *scroll = [[UIScrollView alloc] init];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:scroll];
+
+    UIView *cont = [[UIView alloc] init];
+    cont.translatesAutoresizingMaskIntoConstraints = NO;
+    [scroll addSubview:cont];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [scroll.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [cont.topAnchor constraintEqualToAnchor:scroll.topAnchor],
+        [cont.leadingAnchor constraintEqualToAnchor:scroll.leadingAnchor],
+        [cont.trailingAnchor constraintEqualToAnchor:scroll.trailingAnchor],
+        [cont.bottomAnchor constraintEqualToAnchor:scroll.bottomAnchor],
+        [cont.widthAnchor constraintEqualToAnchor:scroll.widthAnchor],
+    ]];
+
+    // ── Scan result card ──────────────────────────────────
+    UIView *card = [[UIView alloc] init];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.backgroundColor = FVD_CARD;
+    card.layer.cornerRadius = FVD_R_MD;
+    card.layer.borderWidth = 1;
+    card.layer.borderColor = FVD_BORDER.CGColor;
+
+    UIImageView *ico = [[UIImageView alloc] initWithImage:FVDICON(FVDIconImage, 22, FVD_ACCENT)];
+    ico.translatesAutoresizingMaskIntoConstraints = NO;
+    ico.contentMode = UIViewContentModeScaleAspectFit;
+
+    _countLabel = [UILabel new];
+    _countLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _countLabel.text = @"Đang scan màn hình...";
+    _countLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
+    _countLabel.textColor = FVD_TEXT;
 
     _statusLabel = [UILabel new];
     _statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _statusLabel.text = @"Đang mở chọn ảnh...";
-    _statusLabel.font = [UIFont systemFontOfSize:13];
+    _statusLabel.text = @"Hãy mở màn hình nhập nhiều lớp trong VideoStar";
+    _statusLabel.font = [UIFont systemFontOfSize:12];
     _statusLabel.textColor = FVD_SUBTEXT;
-    _statusLabel.textAlignment = NSTextAlignmentCenter;
     _statusLabel.numberOfLines = 0;
 
-    [self.view addSubview:_spinner];
-    [self.view addSubview:_statusLabel];
+    // Rescan button
+    UIButton *rescan = [UIButton buttonWithType:UIButtonTypeSystem];
+    rescan.translatesAutoresizingMaskIntoConstraints = NO;
+    [rescan setTitle:@"Scan lại" forState:UIControlStateNormal];
+    [rescan setTitleColor:FVD_ACCENT forState:UIControlStateNormal];
+    rescan.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    [rescan addTarget:self action:@selector(scanCurrentScreen) forControlEvents:UIControlEventTouchUpInside];
+
+    [card addSubview:ico];
+    [card addSubview:_countLabel];
+    [card addSubview:_statusLabel];
+    [card addSubview:rescan];
     [NSLayoutConstraint activateConstraints:@[
-        [_spinner.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [_spinner.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor constant:-16],
-        [_statusLabel.topAnchor constraintEqualToAnchor:_spinner.bottomAnchor constant:10],
-        [_statusLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [_statusLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
-        [_statusLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
+        [ico.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [ico.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
+        [ico.widthAnchor constraintEqualToConstant:22],
+        [ico.heightAnchor constraintEqualToConstant:22],
+        [_countLabel.leadingAnchor constraintEqualToAnchor:ico.trailingAnchor constant:10],
+        [_countLabel.centerYAnchor constraintEqualToAnchor:ico.centerYAnchor],
+        [_countLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
+        [_statusLabel.topAnchor constraintEqualToAnchor:ico.bottomAnchor constant:8],
+        [_statusLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [_statusLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
+        [rescan.topAnchor constraintEqualToAnchor:_statusLabel.bottomAnchor constant:8],
+        [rescan.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [rescan.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-10],
+    ]];
+
+    // ── Pick button ───────────────────────────────────────
+    _pickBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    _pickBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    _pickBtn.layer.cornerRadius = FVD_R_MD;
+    _pickBtn.alpha = 0.4;
+    _pickBtn.enabled = NO;
+
+    CAGradientLayer *g = FVDMakeGradient(FVD_ACCENT, FVD_ACCENT2, 90);
+    g.cornerRadius = FVD_R_MD;
+    g.frame = CGRectMake(0, 0, 10, 10);
+    [_pickBtn.layer insertSublayer:g atIndex:0];
+
+    [_pickBtn setTitle:@"Chọn Ảnh Thay Thế" forState:UIControlStateNormal];
+    [_pickBtn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    _pickBtn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
+    [_pickBtn addTarget:self action:@selector(pickImage) forControlEvents:UIControlEventTouchUpInside];
+    _pickBtn.heightAnchor.constraintEqualToConstant(52).active = YES;
+
+    // ── Progress ──────────────────────────────────────────
+    _progressLabel = [UILabel new];
+    _progressLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _progressLabel.font = [UIFont systemFontOfSize:12];
+    _progressLabel.textColor = FVD_SUBTEXT;
+    _progressLabel.textAlignment = NSTextAlignmentCenter;
+    _progressLabel.hidden = YES;
+
+    _progressBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    _progressBar.translatesAutoresizingMaskIntoConstraints = NO;
+    _progressBar.progressTintColor = FVD_ACCENT;
+    _progressBar.trackTintColor = FVD_BG;
+    _progressBar.layer.cornerRadius = 3;
+    _progressBar.clipsToBounds = YES;
+    _progressBar.hidden = YES;
+    _progressBar.heightAnchor.constraintEqualToConstant(6).active = YES;
+
+    // Layout
+    for (UIView *v in @[card, _pickBtn, _progressLabel, _progressBar]) {
+        [cont addSubview:v];
+        [NSLayoutConstraint activateConstraints:@[
+            [v.leadingAnchor constraintEqualToAnchor:cont.leadingAnchor constant:14],
+            [v.trailingAnchor constraintEqualToAnchor:cont.trailingAnchor constant:-14],
+        ]];
+    }
+    [NSLayoutConstraint activateConstraints:@[
+        [card.topAnchor constraintEqualToAnchor:cont.topAnchor constant:14],
+        [_pickBtn.topAnchor constraintEqualToAnchor:card.bottomAnchor constant:14],
+        [_progressLabel.topAnchor constraintEqualToAnchor:_pickBtn.bottomAnchor constant:10],
+        [_progressBar.topAnchor constraintEqualToAnchor:_progressLabel.bottomAnchor constant:6],
+        [_progressBar.bottomAnchor constraintEqualToAnchor:cont.bottomAnchor constant:-20],
     ]];
 }
 
-// ════════════════════════════════════════════════════════
-// MARK: - Open VideoStar's Own Media Picker
-// ════════════════════════════════════════════════════════
-- (void)openVSMediaPicker {
-    // ── Step 1: Try to trigger VideoStar's native "replace media" flow ──────
-    // VideoStar's picker shows their asset library (3D text, overlays, etc.) + photos.
-    // We find it by scanning all loaded VC classes for known VS patterns,
-    // OR by calling the replace selector on the current selected layer.
-
-    // Try direct "replace" on current layer first
-    if ([self triggerNativeReplaceOnCurrentLayer]) return;
-
-    // Try to find and present VS media picker class
-    if ([self presentVSMediaPickerClass]) return;
-
-    // Fallback: PHPicker (at least works)
-    [self presentFallbackPicker];
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    for (CALayer *l in _pickBtn.layer.sublayers) {
+        if ([l isKindOfClass:[CAGradientLayer class]]) {
+            l.frame = _pickBtn.bounds;
+            l.cornerRadius = _pickBtn.layer.cornerRadius;
+        }
+    }
 }
 
-// ── Method 1: Trigger VideoStar's own replace flow on selected layer ──────────
-- (BOOL)triggerNativeReplaceOnCurrentLayer {
-    // Find selected layer / clip in VideoStar's project controller
-    id selectedLayer = nil;
+// ════════════════════════════════════════════════════════
+// MARK: - Scan màn hình hiện tại của VideoStar
+// ════════════════════════════════════════════════════════
+- (void)scanCurrentScreen {
+    _countLabel.text = @"Đang scan...";
+    _countLabel.textColor = FVD_SUBTEXT;
+    _statusLabel.text = @"";
+    _pickBtn.enabled = NO;
+    _pickBtn.alpha = 0.4;
+    _progressLabel.hidden = YES;
+    _progressBar.hidden = YES;
+    [self.foundLayers removeAllObjects];
 
-    Class ctrl = NSClassFromString(@"VSProjectController");
-    if (ctrl && [ctrl respondsToSelector:@selector(sharedController)]) {
-        id shared = [ctrl performSelector:@selector(sharedController)];
-        // Try selectedLayer, selectedClip, currentLayer, etc.
-        for (NSString *s in @[@"selectedLayer",@"selectedClip",@"currentLayer",@"currentClip",@"activeLayer"]) {
-            SEL sel = NSSelectorFromString(s);
-            if ([shared respondsToSelector:sel]) {
-                selectedLayer = [shared performSelector:sel];
-                if (selectedLayer) break;
-            }
-        }
-        // Also try from currentProject
-        if (!selectedLayer) {
-            id project = [shared respondsToSelector:@selector(currentProject)]
-                ? [shared performSelector:@selector(currentProject)] : nil;
-            for (NSString *s in @[@"selectedLayer",@"selectedClip",@"currentLayer"]) {
-                SEL sel = NSSelectorFromString(s);
-                if ([project respondsToSelector:sel]) {
-                    selectedLayer = [project performSelector:sel];
-                    if (selectedLayer) break;
+    // Scan trên main thread vì cần truy cập UIView hierarchy
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Tìm VideoStar VC đang hiển thị (không phải FVD overlay)
+        UIViewController *vsVC = [self findCurrentVideoStarVC];
+        UIView *scanRoot = vsVC ? vsVC.view : nil;
+
+        // Nếu không tìm được VC cụ thể, scan toàn window nhưng bỏ qua FVD views
+        if (!scanRoot) {
+            for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
+                if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+                for (UIWindow *win in sc.windows) {
+                    NSString *cls = NSStringFromClass([win class]);
+                    if ([cls containsString:@"FVD"] || [cls containsString:@"FallVds"]) continue;
+                    scanRoot = win;
+                    break;
                 }
+                if (scanRoot) break;
             }
         }
-    }
 
-    if (!selectedLayer) return NO;
+        NSMutableArray *found = [NSMutableArray new];
+        if (scanRoot) [self collectMediaViews:scanRoot into:found];
 
-    // Try to call replace/changeMedia on the layer
-    // This will trigger VideoStar's own picker natively
-    for (NSString *s in @[@"replaceMedia", @"changeMedia", @"replaceClip",
-                          @"showMediaPicker", @"pickReplacementMedia"]) {
-        SEL sel = NSSelectorFromString(s);
-        if ([selectedLayer respondsToSelector:sel]) {
-            [selectedLayer performSelector:sel withObject:nil afterDelay:0];
-            // Swizzle result to apply to all layers after user picks
-            [self hookVSPickerCompletion];
-            return YES;
+        [self.foundLayers addObjectsFromArray:found];
+
+        if (found.count > 0) {
+            self.countLabel.text = [NSString stringWithFormat:@"Tìm thấy %ld lớp media", (long)found.count];
+            self.countLabel.textColor = FVD_GREEN;
+            self.statusLabel.text = @"Chọn ảnh để thay tất cả lớp bên dưới.";
+            self.pickBtn.enabled = YES;
+            [UIView animateWithDuration:0.2 animations:^{ self.pickBtn.alpha = 1.0; }];
+        } else {
+            self.countLabel.text = @"Không tìm thấy lớp media";
+            self.countLabel.textColor = FVD_RED;
+            self.statusLabel.text = @"Vào màn hình nhập nhiều lớp trong VideoStar rồi nhấn Scan lại.";
         }
-    }
-    return NO;
+    });
 }
 
-// ── Method 2: Find VideoStar's media picker VC class by runtime scan ──────────
-- (BOOL)presentVSMediaPickerClass {
-    // Keywords that VS commonly uses for their asset/media picker
-    NSArray *patterns = @[
-        @"VSMediaLibraryViewController",
-        @"VSAssetPickerViewController",
-        @"VSMediaPickerViewController",
-        @"VSStockMediaViewController",
-        @"VSContentPickerViewController",
-        @"VideoStarMediaPicker",
-        @"VSLibraryViewController",
-        @"VSAssetLibraryViewController",
-    ];
+// Tìm VC VideoStar đang hiển thị (top-most VC không phải FVD)
+- (UIViewController *)findCurrentVideoStarVC {
+    UIViewController *top = nil;
 
-    // First try known names directly
-    for (NSString *name in patterns) {
-        Class cls = NSClassFromString(name);
-        if (cls && [cls isSubclassOfClass:[UIViewController class]]) {
-            return [self instantiateAndPresent:cls];
-        }
-    }
-
-    // Runtime scan for any VS*ViewController that deals with media/assets
-    unsigned int count;
-    Class *classes = objc_copyClassList(&count);
-    Class found = Nil;
-
-    for (unsigned int i = 0; i < count; i++) {
-        NSString *name = NSStringFromClass(classes[i]);
-        if (![name hasPrefix:@"VS"]) continue;
-        if (![classes[i] isSubclassOfClass:[UIViewController class]]) continue;
-
-        BOOL hasMedia = [name containsString:@"Media"] || [name containsString:@"Asset"]
-                     || [name containsString:@"Library"] || [name containsString:@"Stock"]
-                     || [name containsString:@"Content"] || [name containsString:@"Picker"];
-        if (hasMedia) {
-            found = classes[i];
+    for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
+        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *win in sc.windows) {
+            NSString *winCls = NSStringFromClass([win class]);
+            if ([winCls containsString:@"FVD"] || [winCls containsString:@"FallVds"]) continue;
+            top = win.rootViewController;
             break;
         }
+        if (top) break;
     }
-    free(classes);
 
-    if (found) return [self instantiateAndPresent:found];
-    return NO;
+    if (!top) return nil;
+
+    // Đi xuống đến topmost VC
+    while (top.presentedViewController) top = top.presentedViewController;
+    if ([top isKindOfClass:[UINavigationController class]])
+        top = [(UINavigationController *)top topViewController];
+    if ([top isKindOfClass:[UITabBarController class]])
+        top = [(UITabBarController *)top selectedViewController];
+
+    // Bỏ qua FVD VC
+    NSString *cls = NSStringFromClass([top class]);
+    if ([cls containsString:@"FVD"] || [cls containsString:@"FallVds"]) return nil;
+
+    return top;
 }
 
-- (BOOL)instantiateAndPresent:(Class)cls {
-    @try {
-        UIViewController *vc = [[cls alloc] init];
-        if (!vc) return NO;
+// Quét UIView hierarchy tìm các lớp media có thể thay
+- (void)collectMediaViews:(UIView *)view into:(NSMutableArray *)arr {
+    // Bỏ qua toàn bộ FVD overlay
+    NSString *cls = NSStringFromClass([view class]);
+    if ([cls containsString:@"FVD"] || [cls containsString:@"FallVds"]) return;
 
-        // Try to set a completion/delegate that we intercept
-        // Set ourselves as delegate if the picker uses a delegate pattern
-        for (NSString *s in @[@"setDelegate:",@"setPickerDelegate:",@"setCompletionBlock:"]) {
-            SEL sel = NSSelectorFromString(s);
-            if ([vc respondsToSelector:sel]) {
-                // We'll hook after presentation via observation
-                break;
-            }
+    // Lớp UIImageView có ảnh thực → đây là media layer
+    if ([view isKindOfClass:[UIImageView class]]) {
+        UIImageView *iv = (UIImageView *)view;
+        // Chỉ lấy các ImageView có size đáng kể (loại icon nhỏ)
+        BOOL bigEnough = iv.frame.size.width > 40 && iv.frame.size.height > 40;
+        if (iv.image && bigEnough && ![arr containsObject:iv]) {
+            [arr addObject:iv];
         }
+    }
 
-        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
-        nav.modalPresentationStyle = UIModalPresentationFormSheet;
+    // VS-specific layer objects (nếu có)
+    if ([view respondsToSelector:@selector(setSourceImage:)] && ![arr containsObject:view])
+        [arr addObject:view];
+    if ([view respondsToSelector:@selector(setVideoURL:)] && ![arr containsObject:view])
+        [arr addObject:view];
 
-        UIViewController *root = self;
-        while (root.presentingViewController) root = root.presentingViewController;
-        [root presentViewController:nav animated:YES completion:nil];
-
-        // After picker presented, hook dismiss to capture selection
-        [self hookVSPickerCompletion];
-        [self updateStatus:@"Chọn ảnh từ thư viện VideoStar..."];
-        return YES;
-    } @catch (...) {
-        return NO;
+    for (UIView *sub in view.subviews) {
+        [self collectMediaViews:sub into:arr];
     }
 }
 
-// ── Method 3: Fallback PHPicker ───────────────────────────────────────────────
-- (void)presentFallbackPicker {
+// ════════════════════════════════════════════════════════
+// MARK: - Pick Image
+// ════════════════════════════════════════════════════════
+- (void)pickImage {
     PHPickerConfiguration *cfg = [[PHPickerConfiguration alloc] init];
     cfg.selectionLimit = 1;
     cfg.filter = [PHPickerFilter imagesFilter];
@@ -217,175 +298,66 @@
     UIViewController *root = self;
     while (root.presentingViewController) root = root.presentingViewController;
     [root presentViewController:picker animated:YES completion:nil];
-    [self updateStatus:@"Chọn ảnh để thay..."];
 }
 
-// PHPicker delegate (fallback)
 - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
     [picker dismissViewControllerAnimated:YES completion:nil];
-    if (!results.count) {
-        [self updateStatus:@"Đã huỷ."];
-        return;
-    }
+    if (!results.count) return;
+
     [[results.firstObject itemProvider] loadObjectOfClass:[UIImage class]
                                        completionHandler:^(UIImage *img, NSError *e) {
         if (!img) return;
-        dispatch_async(dispatch_get_main_queue(), ^{ [self applyImageToAllLayers:img]; });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self applyImage:img];
+        });
     }];
-}
-
-// ── Hook VideoStar picker completion ─────────────────────────────────────────
-// When VideoStar's picker dismisses, check if any layer's media changed and
-// propagate that change to ALL other layers.
-- (void)hookVSPickerCompletion {
-    // Store snapshot of current layer media state before picker
-    // After picker dismisses, diff the state and copy the changed media to all layers
-    __weak typeof(self) weak = self;
-    NSArray *layers = [self getAllLayers];
-    NSMutableArray *beforeSnapshots = [NSMutableArray new];
-    for (id layer in layers) {
-        id img = nil;
-        @try {
-            if ([layer respondsToSelector:@selector(image)]) img = [layer performSelector:@selector(image)];
-            else if ([layer respondsToSelector:@selector(sourceImage)]) img = [layer performSelector:@selector(sourceImage)];
-        } @catch (...) {}
-        [beforeSnapshots addObject:img ?: [NSNull null]];
-    }
-
-    // Poll after picker expected to close (simple approach)
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [weak pollForChangedLayer:layers beforeSnapshots:beforeSnapshots attempts:20];
-    });
-}
-
-- (void)pollForChangedLayer:(NSArray *)layers beforeSnapshots:(NSArray *)before attempts:(int)left {
-    if (left <= 0) return;
-
-    // Check if any layer's image changed
-    UIImage *changedImg = nil;
-    for (NSInteger i = 0; i < layers.count; i++) {
-        id layer = layers[i];
-        id nowImg = nil;
-        @try {
-            if ([layer respondsToSelector:@selector(image)]) nowImg = [layer performSelector:@selector(image)];
-            else if ([layer respondsToSelector:@selector(sourceImage)]) nowImg = [layer performSelector:@selector(sourceImage)];
-        } @catch (...) {}
-
-        id wasImg = before[i];
-        BOOL changed = (nowImg != nil && nowImg != [NSNull null])
-                    && (wasImg == [NSNull null] || nowImg != wasImg);
-        if (changed && [nowImg isKindOfClass:[UIImage class]]) {
-            changedImg = (UIImage *)nowImg;
-            break;
-        }
-    }
-
-    if (changedImg) {
-        [self applyImageToAllLayers:changedImg];
-        return;
-    }
-
-    // Keep polling
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self pollForChangedLayer:layers beforeSnapshots:before attempts:left - 1];
-    });
 }
 
 // ════════════════════════════════════════════════════════
 // MARK: - Apply to All Layers
 // ════════════════════════════════════════════════════════
-- (void)applyImageToAllLayers:(UIImage *)img {
-    [self updateStatus:@"Đang thay tất cả lớp..."];
+- (void)applyImage:(UIImage *)img {
+    NSArray *layers = [self.foundLayers copy];
+    NSInteger total = layers.count;
+    if (!total) return;
+
+    _pickBtn.enabled = NO;
+    _progressLabel.hidden = NO;
+    _progressBar.hidden = NO;
+    _progressBar.progress = 0;
+    _progressLabel.text = [NSString stringWithFormat:@"Đang thay 0/%ld lớp...", (long)total];
 
     NSData *data = UIImageJPEGRepresentation(img, 0.95) ?: UIImagePNGRepresentation(img);
-    NSArray *layers = [self getAllLayers];
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-        for (id layer in layers) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                @try {
-                    if ([layer isKindOfClass:[UIImageView class]])
-                        ((UIImageView *)layer).image = img;
-                    if ([layer respondsToSelector:@selector(setImage:)])
-                        [layer performSelector:@selector(setImage:) withObject:img];
-                    if ([layer respondsToSelector:@selector(setSourceImage:)])
-                        [layer performSelector:@selector(setSourceImage:) withObject:img];
-                    if ([layer respondsToSelector:@selector(setVideoURL:)]) {
-                        NSString *p = [NSTemporaryDirectory() stringByAppendingPathComponent:@"fvd_rep.jpg"];
-                        if ([data writeToFile:p atomically:YES])
-                            [layer performSelector:@selector(setVideoURL:)
-                                       withObject:[NSURL fileURLWithPath:p]];
-                    }
-                    if ([layer respondsToSelector:@selector(setNeedsDisplay)])
-                        [layer performSelector:@selector(setNeedsDisplay)];
-                } @catch (...) {}
-            });
-        }
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self.spinner stopAnimating];
-            self.spinner.hidden = YES;
-            if (layers.count > 0) {
-                [self updateStatus:[NSString stringWithFormat:@"✅ Đã thay %ld lớp!", (long)layers.count]];
-                self.statusLabel.textColor = FVD_GREEN;
-            } else {
-                [self updateStatus:@"Không tìm thấy lớp.\nMở project VideoStar rồi thử lại."];
-                self.statusLabel.textColor = FVD_RED;
+    for (NSInteger i = 0; i < total; i++) {
+        id layer = layers[i];
+        @try {
+            if ([layer isKindOfClass:[UIImageView class]])
+                ((UIImageView *)layer).image = img;
+            if ([layer respondsToSelector:@selector(setImage:)])
+                [layer performSelector:@selector(setImage:) withObject:img];
+            if ([layer respondsToSelector:@selector(setSourceImage:)])
+                [layer performSelector:@selector(setSourceImage:) withObject:img];
+            if ([layer respondsToSelector:@selector(setVideoURL:)]) {
+                NSString *p = [NSTemporaryDirectory() stringByAppendingPathComponent:@"fvd_rep.jpg"];
+                if ([data writeToFile:p atomically:YES])
+                    [layer performSelector:@selector(setVideoURL:) withObject:[NSURL fileURLWithPath:p]];
             }
-        });
-    });
-}
+            if ([layer respondsToSelector:@selector(setNeedsDisplay)])
+                [layer performSelector:@selector(setNeedsDisplay)];
+        } @catch (...) {}
 
-// ════════════════════════════════════════════════════════
-// MARK: - Helpers
-// ════════════════════════════════════════════════════════
-- (NSArray *)getAllLayers {
-    NSMutableArray *result = [NSMutableArray new];
-
-    Class ctrl = NSClassFromString(@"VSProjectController");
-    if (ctrl && [ctrl respondsToSelector:@selector(sharedController)]) {
-        id shared = [ctrl performSelector:@selector(sharedController)];
-        id project = [shared respondsToSelector:@selector(currentProject)]
-            ? [shared performSelector:@selector(currentProject)] : nil;
-        if (project) {
-            for (NSString *s in @[@"layers",@"allLayers",@"videoLayers",@"imageLayers",@"clips"]) {
-                SEL sel = NSSelectorFromString(s);
-                if ([project respondsToSelector:sel]) {
-                    id obj = [project performSelector:sel];
-                    if ([obj isKindOfClass:[NSArray class]] && [(NSArray*)obj count]) {
-                        [result addObjectsFromArray:(NSArray*)obj]; break;
-                    }
-                }
-            }
-        }
+        CGFloat prog = (float)(i + 1) / total;
+        [_progressBar setProgress:prog animated:YES];
+        _progressLabel.text = [NSString stringWithFormat:@"Đang thay %ld/%ld lớp...", (long)(i+1), (long)total];
     }
 
-    if (!result.count) {
-        // Fallback: scan UIImageViews from window hierarchy
-        for (UIWindowScene *sc in [UIApplication sharedApplication].connectedScenes) {
-            if (![sc isKindOfClass:[UIWindowScene class]]) continue;
-            for (UIWindow *win in sc.windows) {
-                [self collectViews:win into:result];
-            }
-        }
-    }
-    return result;
-}
-
-- (void)collectViews:(UIView *)v into:(NSMutableArray *)arr {
-    NSString *cls = NSStringFromClass([v class]);
-    if ([cls containsString:@"FVD"] || [cls containsString:@"FallVds"]) return;
-    if ([v isKindOfClass:[UIImageView class]] && ((UIImageView*)v).image) [arr addObject:v];
-    else if ([v respondsToSelector:@selector(setSourceImage:)]) [arr addObject:v];
-    else if ([v respondsToSelector:@selector(setVideoURL:)])    [arr addObject:v];
-    for (UIView *sub in v.subviews) [self collectViews:sub into:arr];
-}
-
-- (void)updateStatus:(NSString *)text {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self.statusLabel.text = text;
-        self.statusLabel.textColor = FVD_SUBTEXT;
-    });
+    _progressLabel.text = [NSString stringWithFormat:@"✅ Đã thay %ld lớp!", (long)total];
+    _progressLabel.textColor = FVD_GREEN;
+    _countLabel.text = [NSString stringWithFormat:@"✅ Xong — %ld lớp đã thay", (long)total];
+    _countLabel.textColor = FVD_GREEN;
+    _pickBtn.enabled = YES;
+    [UIView animateWithDuration:0.2 animations:^{ self.pickBtn.alpha = 1.0; }];
 }
 
 @end
