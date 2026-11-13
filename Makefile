@@ -1,13 +1,12 @@
-INSTALL_TARGET_PROCESSES = VideoStar
 ARCHS = arm64
 TARGET = iphone:clang:16.5:14.0
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = FallVdsTool
+LIBRARY_NAME = FallVdsTool
 
 FallVdsTool_FILES = \
-	Tweak.x \
+	Tweak.m \
 	FallVdsTool/FallVdsToolUI.m \
 	FallVdsTool/FloatingButton.m \
 	FallVdsTool/HideStream.m \
@@ -17,10 +16,9 @@ FallVdsTool_FILES = \
 	FallVdsTool/QRImporterVC.m
 
 FallVdsTool_CFLAGS  = -fobjc-arc -I./FallVdsTool
-FallVdsTool_CCFLAGS = -fobjc-arc
 FallVdsTool_FRAMEWORKS = \
 	UIKit CoreGraphics Foundation \
 	AVFoundation Photos PhotosUI \
-	QuartzCore ReplayKit
+	QuartzCore ReplayKit StoreKit
 
-include $(THEOS_MAKE_PATH)/tweak.mk
+include $(THEOS_MAKE_PATH)/library.mk
