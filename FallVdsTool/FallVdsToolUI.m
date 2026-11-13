@@ -611,27 +611,45 @@
 }
 
 - (void)setupOverlayWindow {
-    UIWindowScene *scene = nil;
-    for (UIWindowScene *s in [UIApplication sharedApplication].connectedScenes) {
-        if ([s isKindOfClass:[UIWindowScene class]] && s.activationState == UISceneActivationStateForegroundActive) {
-            scene = s; break;
+    @try {
+        UIWindowScene *scene = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+                if ([s isKindOfClass:[UIWindowScene class]]) {
+                    scene = (UIWindowScene *)s;
+                    if (s.activationState == UISceneActivationStateForegroundActive) {
+                        break;
+                    }
+                }
+            }
         }
+
+        if (@available(iOS 13.0, *)) {
+            if (scene) {
+                _overlayWindow = [[FVDOverlayWindow alloc] initWithWindowScene:scene];
+            } else {
+                _overlayWindow = [[FVDOverlayWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+            }
+        } else {
+            _overlayWindow = [[FVDOverlayWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        }
+
+        _overlayWindow.windowLevel = UIWindowLevelStatusBar + 100;
+        _overlayWindow.backgroundColor = UIColor.clearColor;
+        _overlayWindow.hidden = NO;
+
+        UIViewController *root = [[UIViewController alloc] init];
+        root.view.backgroundColor = UIColor.clearColor;
+        root.view.userInteractionEnabled = NO;
+        _overlayWindow.rootViewController = root;
+
+        // Add floating button
+        FloatingButton *btn = [FloatingButton sharedInstance];
+        btn.delegate = self;
+        [btn showInWindow:_overlayWindow];
+    } @catch (NSException *e) {
+        NSLog(@"[FallVdsTool] setupOverlayWindow exception: %@", e);
     }
-
-    _overlayWindow = [[FVDOverlayWindow alloc] initWithWindowScene:scene];
-    _overlayWindow.windowLevel = UIWindowLevelStatusBar + 100;
-    _overlayWindow.backgroundColor = UIColor.clearColor;
-    _overlayWindow.hidden = NO;
-
-    UIViewController *root = [[UIViewController alloc] init];
-    root.view.backgroundColor = UIColor.clearColor;
-    root.view.userInteractionEnabled = NO;
-    _overlayWindow.rootViewController = root;
-
-    // Add floating button
-    FloatingButton *btn = [FloatingButton sharedInstance];
-    btn.delegate = self;
-    [btn showInWindow:_overlayWindow];
 }
 
 - (void)floatingButtonTapped {
