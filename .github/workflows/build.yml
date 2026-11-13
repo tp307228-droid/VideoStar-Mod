@@ -66,15 +66,14 @@ jobs:
           sudo cp "$BIN" /usr/local/bin/insert_dylib && chmod +x /usr/local/bin/insert_dylib
 
       - name: Download VideoStar-Pro.ipa
+        env:
+          AUTH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -e
           echo "Downloading VideoStar-Pro.ipa from Vds-Pro releases..."
-          # Use PAT_TOKEN to access Vds-Pro (may be private repo)
-          AUTH_TOKEN="${{ secrets.PAT_TOKEN }}"
-          [ -z "$AUTH_TOKEN" ] && AUTH_TOKEN="${{ secrets.GITHUB_TOKEN }}"
 
           RELEASES_JSON=$(curl -sf \
-            -H "Authorization: Bearer $AUTH_TOKEN" \
+            -H "Authorization: Bearer ${AUTH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/tp307228-droid/Vds-Pro/releases")
 
@@ -88,15 +87,21 @@ for rel in releases:
             sys.exit(0)
 " 2>/dev/null)
 
-          [ -z "$ASSET_URL" ] && { echo "ERROR: VideoStar-Pro.ipa not found in Vds-Pro releases. Run Vds-Pro build first!"; exit 1; }
+          if [ -z "$ASSET_URL" ]; then
+            echo "ERROR: VideoStar-Pro.ipa not found in Vds-Pro releases!"
+            exit 1
+          fi
           echo "Found asset, downloading..."
 
           curl -fL \
-            -H "Authorization: Bearer $AUTH_TOKEN" \
+            -H "Authorization: Bearer ${AUTH_TOKEN}" \
             -H "Accept: application/octet-stream" \
             "$ASSET_URL" -o VideoStar-Pro.ipa --retry 3 --retry-delay 5
 
-          [ ! -s "VideoStar-Pro.ipa" ] && { echo "Downloaded file is empty"; exit 1; }
+          if [ ! -s "VideoStar-Pro.ipa" ]; then
+            echo "Downloaded file is empty"
+            exit 1
+          fi
           echo "Downloaded: $(du -sh VideoStar-Pro.ipa | cut -f1)"
 
       - name: Extract Pro IPA
