@@ -11,6 +11,8 @@ jobs:
     runs-on: macos-latest
     permissions:
       contents: write
+    env:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
 
     steps:
       - name: Checkout
@@ -66,35 +68,36 @@ jobs:
           sudo cp "$BIN" /usr/local/bin/insert_dylib && chmod +x /usr/local/bin/insert_dylib
 
       - name: Download VideoStar-Pro.ipa
-        env:
-          AUTH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -e
           echo "Downloading VideoStar-Pro.ipa from Vds-Pro releases..."
 
-          RELEASES_JSON=$(curl -sf \
-            -H "Authorization: Bearer ${AUTH_TOKEN}" \
+          RELEASES=$(curl -sf \
+            -H "Authorization: Bearer ${PAT_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/tp307228-droid/Vds-Pro/releases")
 
-          ASSET_URL=$(echo "$RELEASES_JSON" | python3 -c "
-import sys, json
-releases = json.load(sys.stdin)
-for rel in releases:
-    for a in rel.get('assets', []):
-        if a['name'] == 'VideoStar-Pro.ipa':
-            print(a['url'])
-            sys.exit(0)
-" 2>/dev/null)
+          ASSET_URL=$(echo "$RELEASES" | \
+            grep -o '"url": "https://api.github.com/repos/tp307228-droid/Vds-Pro/releases/assets/[^"]*"' | \
+            head -1 | sed 's/"url": "//;s/"//')
 
+          # Also try by scanning for name=VideoStar-Pro.ipa
           if [ -z "$ASSET_URL" ]; then
-            echo "ERROR: VideoStar-Pro.ipa not found in Vds-Pro releases!"
+            echo "Trying jq method..."
+            ASSET_URL=$(echo "$RELEASES" | \
+              python3 -c "import sys,json; d=json.load(sys.stdin); [print(a['url']) for r in d for a in r.get('assets',[]) if a['name']=='VideoStar-Pro.ipa']" 2>/dev/null | head -1)
+          fi
+
+          echo "Asset URL: $ASSET_URL"
+          if [ -z "$ASSET_URL" ]; then
+            echo "ERROR: VideoStar-Pro.ipa asset not found!"
+            echo "Available releases:"
+            echo "$RELEASES" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(r['tag_name'], [a['name'] for a in r.get('assets',[])]) for r in d]" 2>/dev/null
             exit 1
           fi
-          echo "Found asset, downloading..."
 
           curl -fL \
-            -H "Authorization: Bearer ${AUTH_TOKEN}" \
+            -H "Authorization: Bearer ${PAT_TOKEN}" \
             -H "Accept: application/octet-stream" \
             "$ASSET_URL" -o VideoStar-Pro.ipa --retry 3 --retry-delay 5
 
@@ -121,15 +124,14 @@ for rel in releases:
           DYLIB="${{ steps.dylib.outputs.path }}"
           cp "$DYLIB" "$APP/FallVdsTool.dylib"
 
-          # Copy CydiaSubstrate if Theos built it
           SUB=$(find $HOME/theos -name "CydiaSubstrate" -o -name "libsubstrate.dylib" 2>/dev/null | head -1)
           [ -n "$SUB" ] && cp "$SUB" "$APP/CydiaSubstrate" 2>/dev/null || true
 
           insert_dylib --strip-codesig --all-yes \
             "@executable_path/FallVdsTool.dylib" "$BINARY" "$BINARY"
 
-          echo "Injected! Load commands:"
-          otool -L "$BINARY" | grep -E "FallVds|VdsPro|executable"
+          echo "Injected!"
+          otool -L "$BINARY" | grep -E "FallVds|executable"
 
       - name: Repack final IPA
         run: |
@@ -141,35 +143,27 @@ for rel in releases:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: mod-v${{ github.run_number }}
-          name: "FallVds Tool v1.0 — VideoStar Pro+Mod (Build ${{ github.run_number }})"
+          name: "FallVds Tool v1.0 - VideoStar Pro+Mod (Build ${{ github.run_number }})"
           body: |
-            ## FallVds Tool — VideoStar Pro + Mod
+            ## FallVds Tool - VideoStar Pro + Mod
 
-            **Tải file này, ký bằng eSign là dùng được ngay!**
+            **Tai file nay, ky bang eSign la dung duoc ngay!**
 
-            ### Bao gồm:
-            - **VideoStar Pro** — Full unlock, không watermark
-            - **Chạm Thay Media** — Nhập code đoạn, scan lớp, chọn ảnh, thay TẤT CẢ lớp 1 click
-            - **Nhập QR Hàng Loạt** — Chọn range, nhập code từng đoạn, chọn ảnh, tự inject all
-            - **Hide of Stream** — Ẩn tool khỏi màn hình quay/chụp
-            - **Nút nổi** — Kéo được, snap cạnh, gradient đẹp
-            - **Bản quyền** — Key system + UUID thiết bị
+            ### Bao gom:
+            - VideoStar Pro - Full unlock, khong watermark
+            - Cham Thay Media - Scan lop, chon anh, thay TAT CA lop 1 click
+            - Nhap QR Hang Loat - Chon range, nhap code tung doan, inject all
+            - Hide of Stream - An tool khoi man hinh quay/chup
+            - Nut noi - Keo duoc, snap canh
 
-            ### Cách cài:
-            1. Tải `VideoStar-Mod.ipa` bên dưới
-            2. Mở **eSign** → Import IPA → Sign → Install
-            3. Mở VideoStar → nhấn nút **sao** nổi trên màn hình
-            4. Tab **Bản Quyền** → nhập key beta: `MinhTienVds`
+            ### Beta Key: MinhTienVds
+            ### Discord: discord.gg/swaggang
 
-            ### Beta Key:
-            ```
-            MinhTienVds
-            ```
-
-            ### Discord: [discord.gg/swaggang](https://discord.gg/swaggang)
-
-            ---
-            Build: `${{ github.sha }}`
+            ### Cach cai:
+            1. Tai VideoStar-Mod.ipa
+            2. Mo eSign - Import IPA - Sign - Install
+            3. Mo VideoStar - nhan nut sao noi tren man hinh
+            4. Tab Ban Quyen - nhap key: MinhTienVds
           files: VideoStar-Mod.ipa
           draft: false
           prerelease: false
