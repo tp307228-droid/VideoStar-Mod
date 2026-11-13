@@ -10,6 +10,7 @@
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wundeclared-selector"
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MARK: - Swizzle UIWindow makeKeyAndVisible
